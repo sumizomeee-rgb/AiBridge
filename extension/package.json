@@ -1,0 +1,18 @@
+{
+  "name": "webai-bridge-extension",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite build --watch",
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1",
+    "vite-plugin-web-extension": "^4.5.0"
+  },
+  "dependencies": {
+    "playwright": "^1.58.2"
+  }
+}

@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body { width: 280px; padding: 12px; font-family: system-ui; font-size: 13px; }
+    .status { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; }
+    .on { background: #22c55e; }
+    .off { background: #ef4444; }
+    label { display: block; margin: 8px 0 4px; font-weight: 500; }
+    select { width: 100%; padding: 4px; }
+    .nav { margin-top: 12px; border-top: 1px solid #eee; padding-top: 8px; }
+    .nav a { display: block; padding: 4px 0; color: #2563eb; text-decoration: none; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div class="status">
+    <div class="dot" id="dot"></div>
+    <span id="statusText">Connecting...</span>
+  </div>
+
+  <label>Routing Mode</label>
+  <select id="mode">
+    <option value="AUTO">Auto (智能匹配)</option>
+    <option value="OVERRIDE">Override (强制接管)</option>
+  </select>
+
+  <label>Override Target</label>
+  <select id="target" disabled>
+    <option value="gpt">ChatGPT</option>
+    <option value="doubao">豆包</option>
+    <option value="claude">Claude</option>
+    <option value="qwen">通义千问</option>
+  </select>
+
+  <div class="nav" id="nav"></div>
+  <script type="module" src="./main.ts"></script>
+</body>
+</html>
