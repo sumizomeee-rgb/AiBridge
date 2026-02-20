@@ -13,6 +13,14 @@ chrome.runtime.sendMessage({ type: 'getStatus' }, (res) => {
   statusText.textContent = on ? 'Connected' : 'Disconnected';
 });
 
+// 动态生成 target 下拉选项
+for (const [key, { name }] of Object.entries(MODEL_ROUTES)) {
+  const opt = document.createElement('option');
+  opt.value = key;
+  opt.textContent = name;
+  targetSelect.appendChild(opt);
+}
+
 // 加载已保存配置
 chrome.storage.local.get('routing', (data) => {
   const r = data.routing as RoutingConfig | undefined;

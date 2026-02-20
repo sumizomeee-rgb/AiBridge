@@ -33,7 +33,7 @@ export class ChatGPTAdapter implements AiAdapter {
     }
   }
 
-  observeResponse(onChunk: (delta: string) => void, onDone: () => void) {
+  observeResponse(onChunk: (delta: string) => void, onDone: (fullText: string) => void) {
     this.lastLength = 0;
     // 等待回复容器出现后开始监听
     const startObserve = () => {
@@ -62,7 +62,7 @@ export class ChatGPTAdapter implements AiAdapter {
             onChunk(finalText.substring(this.lastLength));
           }
           this.stopObserve();
-          onDone();
+          onDone(finalText);
         }
       }, 500);
     };

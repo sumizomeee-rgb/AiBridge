@@ -8,7 +8,11 @@
     "https://chatgpt.com/*",
     "https://www.doubao.com/*",
     "https://claude.ai/*",
-    "https://tongyi.aliyun.com/*"
+    "https://tongyi.aliyun.com/*",
+    "https://chat.qwen.ai/*",
+    "https://yuanbao.tencent.com/*",
+    "https://www.kimi.com/*",
+    "https://aistudio.xiaomimimo.com/*"
   ],
   "background": {
     "service_worker": "src/background/index.ts"
@@ -19,7 +23,11 @@
         "https://chatgpt.com/*",
         "https://www.doubao.com/*",
         "https://claude.ai/*",
-        "https://tongyi.aliyun.com/*"
+        "https://tongyi.aliyun.com/*",
+        "https://chat.qwen.ai/*",
+        "https://yuanbao.tencent.com/*",
+        "https://www.kimi.com/*",
+        "https://aistudio.xiaomimimo.com/*"
       ],
       "js": ["src/content/index.ts"],
       "run_at": "document_idle"

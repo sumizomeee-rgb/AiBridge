@@ -45,5 +45,8 @@ export const MODEL_ROUTES: Record<string, { name: string; url: string }> = {
   gpt:    { name: 'ChatGPT',  url: 'https://chatgpt.com' },
   doubao: { name: '豆包',      url: 'https://www.doubao.com' },
   claude: { name: 'Claude',   url: 'https://claude.ai' },
-  qwen:   { name: '通义千问',  url: 'https://tongyi.aliyun.com' },
+  qwen:     { name: 'Qwen',      url: 'https://chat.qwen.ai' },
+  yuanbao:  { name: '元宝',      url: 'https://yuanbao.tencent.com' },
+  kimi:     { name: 'Kimi',      url: 'https://www.kimi.com' },
+  mimo:     { name: 'MiMo',      url: 'https://aistudio.xiaomimimo.com' },
 };

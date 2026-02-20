@@ -10,17 +10,21 @@ export class GenericAdapter implements AiAdapter {
   private doneTimer: ReturnType<typeof setInterval> | null = null;
   // 发送前最后一条回复的文本，用于区分新旧回复
   private prevReplyText = '';
+  private prevReplyCount = 0;
 
   async newChat() {
     // 导航由 background 处理，content script 不再自行导航（避免自毁）
   }
 
   async sendMessage(text: string) {
-    // 记录发送前最后一条回复的完整文本
+    // 记录发送前的回复元素数量和最后元素引用
+    this.prevReplyCount = this.countReplyElements();
     const lastEl = this.findLastReplyRaw();
     this.prevReplyText = lastEl?.innerText || '';
+    console.log(`[GenericAdapter] sendMessage: prevCount=${this.prevReplyCount}, prevText.len=${this.prevReplyText.length}, host=${location.hostname}`);
 
     const el = this.findInput();
+    console.log(`[GenericAdapter] findInput: ${el ? el.tagName + '.' + el.className.slice(0, 50) : 'NULL'}`);
     if (!el) throw new Error('Input not found on ' + location.hostname);
 
     el.focus();
@@ -47,19 +51,17 @@ export class GenericAdapter implements AiAdapter {
     }
   }
 
-  observeResponse(onChunk: (delta: string) => void, onDone: () => void) {
+  observeResponse(onChunk: (delta: string) => void, onDone: (fullText: string) => void) {
     this.lastLength = 0;
     let noChangeCount = 0;
     let started = false;
 
     const tick = () => {
-      const container = this.findLastReplyRaw();
-      if (!container) return;
+      const currentCount = this.countReplyElements();
+      // 始终用全部新回复元素的拼接文本，避免 DOM 重构导致单元素丢失内容
+      const text = this.collectNewReplyText() || this.findLastReplyRaw()?.innerText || '';
 
-      const text = container.innerText || '';
-
-      // 跳过发送前就存在的旧回复
-      if (!started && text === this.prevReplyText) return;
+      if (!started && currentCount <= this.prevReplyCount && text === this.prevReplyText) return;
 
       if (text.length > this.lastLength) {
         started = true;
@@ -68,9 +70,9 @@ export class GenericAdapter implements AiAdapter {
         this.lastLength = text.length;
       } else if (started) {
         noChangeCount++;
-        if (noChangeCount >= 6) {
+        if (noChangeCount >= 20) {
           this.stopObserve();
-          onDone();
+          onDone(text);
         }
       }
     };
@@ -81,6 +83,28 @@ export class GenericAdapter implements AiAdapter {
   stopObserve() {
     if (this.doneTimer) { clearInterval(this.doneTimer); this.doneTimer = null; }
     if (this.observer) { this.observer.disconnect(); this.observer = null; }
+  }
+
+  /** 收集 prevReplyCount 之后出现的所有新回复元素文本 */
+  private collectNewReplyText(): string {
+    const selectors = ['[class*="markdown"]', '[class*="message-content"]', '[class*="response"]', '[class*="answer"]', '[class*="assistant"]', '[class*="bot"]'];
+    for (const sel of selectors) {
+      const els = document.querySelectorAll(sel);
+      if (els.length > this.prevReplyCount) {
+        return Array.from(els).slice(this.prevReplyCount)
+          .map(el => (el as HTMLElement).innerText).join('\n');
+      }
+    }
+    return '';
+  }
+
+  private countReplyElements(): number {
+    const selectors = ['[class*="markdown"]', '[class*="message-content"]', '[class*="response"]', '[class*="answer"]', '[class*="assistant"]', '[class*="bot"]'];
+    for (const sel of selectors) {
+      const n = document.querySelectorAll(sel).length;
+      if (n) return n;
+    }
+    return 0;
   }
 
   /** 无条件返回页面上最后一个回复容器 */
@@ -95,8 +119,12 @@ export class GenericAdapter implements AiAdapter {
     ];
     for (const sel of selectors) {
       const els = document.querySelectorAll(sel);
-      if (els.length) return els[els.length - 1] as HTMLElement;
+      if (els.length) {
+        console.log(`[GenericAdapter] findLastReplyRaw: matched "${sel}" (${els.length} els)`);
+        return els[els.length - 1] as HTMLElement;
+      }
     }
+    console.log('[GenericAdapter] findLastReplyRaw: NO MATCH');
     return null;
   }
 

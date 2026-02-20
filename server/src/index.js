@@ -20,7 +20,7 @@ try {
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 
 const PORT = config.server.port;
 const activeTasks = new Map();
@@ -62,9 +62,20 @@ function handleExtensionMessage(msg) {
   if (!task) return;
 
   if (msg.type === 'chunk') {
-    writeChunk(task, msg.delta);
+    if (task.hasTools) {
+      // 有 tools 时缓冲全部文本，最后统一解析
+      task.buffer = (task.buffer || '') + msg.delta;
+    } else {
+      writeChunk(task, msg.delta);
+    }
   } else if (msg.type === 'done') {
-    finishTask(task);
+    if (task.hasTools) {
+      // 优先使用完整文本（避免 markdown 重排导致增量 chunk 乱码）
+      if (msg.fullText) task.buffer = msg.fullText;
+      finishTaskWithToolParsing(task);
+    } else {
+      finishTask(task);
+    }
     activeTasks.delete(msg.task_id);
   } else if (msg.type === 'error') {
     writeError(task, msg.code, msg.message);
@@ -104,6 +115,85 @@ function finishTask(task) {
   res.end();
 }
 
+// --- Tool Call 解析 ---
+function repairJson(str) {
+  // 修复常见的 JSON 问题：未转义的反斜杠（Windows路径）
+  // 先尝试直接解析，失败再修复
+  try { return JSON.parse(str); } catch {}
+  // 替换未转义的反斜杠
+  try { return JSON.parse(str.replace(/\\/g, '\\\\')); } catch {}
+  // 尝试提取 name 和 arguments 用正则
+  try {
+    const nameMatch = str.match(/"name"\s*:\s*"([^"]+)"/);
+    const argsMatch = str.match(/"arguments"\s*:\s*(\{[\s\S]*\})\s*$/);
+    if (nameMatch) {
+      let args = {};
+      if (argsMatch) try { args = JSON.parse(argsMatch[1].replace(/\\/g, '\\\\')); } catch {}
+      return { name: nameMatch[1], arguments: args };
+    }
+  } catch {}
+  return null;
+}
+
+function parseToolCalls(text) {
+  const regex = /<tool_call>([\s\S]*?)<\/tool_call>/g;
+  const calls = [];
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    const parsed = repairJson(match[1].trim());
+    if (parsed && parsed.name) {
+      calls.push({
+        id: `call_${uuidv4().slice(0, 8)}`,
+        type: 'function',
+        function: {
+          name: parsed.name,
+          arguments: typeof parsed.arguments === 'string' ? parsed.arguments : JSON.stringify(parsed.arguments || {})
+        }
+      });
+    }
+  }
+  return calls;
+}
+
+function finishTaskWithToolParsing(task) {
+  const { res, task_id, model, buffer } = task;
+  const toolCalls = parseToolCalls(buffer || '');
+  console.log(`[ToolParse] found ${toolCalls.length} tool calls`);
+
+  if (toolCalls.length > 0) {
+    // 发送 tool_calls 格式
+    for (let i = 0; i < toolCalls.length; i++) {
+      const tc = toolCalls[i];
+      res.write(`data: ${JSON.stringify({
+        id: `chatcmpl-${task_id}`, object: 'chat.completion.chunk',
+        created: Math.floor(Date.now() / 1000), model,
+        choices: [{ index: 0, delta: { tool_calls: [{ index: i, ...tc }] }, finish_reason: null }]
+      })}\n\n`);
+    }
+    res.write(`data: ${JSON.stringify({
+      id: `chatcmpl-${task_id}`, object: 'chat.completion.chunk',
+      created: Math.floor(Date.now() / 1000), model,
+      choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }]
+    })}\n\n`);
+  } else {
+    // 没有 tool call，作为普通文本发送
+    if (buffer) {
+      res.write(`data: ${JSON.stringify({
+        id: `chatcmpl-${task_id}`, object: 'chat.completion.chunk',
+        created: Math.floor(Date.now() / 1000), model,
+        choices: [{ index: 0, delta: { content: buffer }, finish_reason: null }]
+      })}\n\n`);
+    }
+    res.write(`data: ${JSON.stringify({
+      id: `chatcmpl-${task_id}`, object: 'chat.completion.chunk',
+      created: Math.floor(Date.now() / 1000), model,
+      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }]
+    })}\n\n`);
+  }
+  res.write(`data: [DONE]\n\n`);
+  res.end();
+}
+
 function writeError(task, code, message) {
   const { res, format } = task;
   const status = code === 'RATE_LIMITED' ? 429 : 502;
@@ -135,56 +225,101 @@ function resolveModel(model) {
   return map[model] || model;
 }
 
+// --- Tool Call System Prompt ---
+// 只保留 web AI 能正确调用的工具
+const ALLOWED_TOOLS = new Set(['bash', 'read', 'write', 'edit', 'glob', 'grep']);
+
+function filterTools(tools) {
+  if (!tools) return null;
+  const filtered = tools.filter(t => {
+    const name = (t.function?.name || t.name || '').toLowerCase();
+    return ALLOWED_TOOLS.has(name);
+  });
+  return filtered.length ? filtered : null;
+}
+
+function buildToolSystemPrompt(tools) {
+  const defs = tools.map(t => {
+    const f = t.function || t;
+    const params = Object.keys(f.parameters?.properties || {}).join(', ');
+    return `- ${f.name}: ${(f.description || '').slice(0, 120)}${params ? `\n  Params: ${params}` : ''}`;
+  }).join('\n');
+  return `You have the following tools:
+${defs}
+
+When you need a tool, output this XML (no other text):
+<tool_call>
+{"name": "ACTUAL_TOOL_NAME", "arguments": {"param": "value"}}
+</tool_call>
+
+Backslashes in strings MUST be doubled: C:\\\\Users not C:\\Users`;
+}
+
 // --- 通用：派发任务到 Extension ---
-function dispatchTask(res, format, model, messages, newChat) {
+function dispatchTask(res, format, model, messages, newChat, tools) {
   model = resolveModel(model);
-  console.log(`[Dispatch] model=${model}, format=${format}, newChat=${newChat}`);
+  const hasTools = tools && tools.length > 0;
+  console.log(`[Dispatch] model=${model}, format=${format}, newChat=${newChat}, tools=${hasTools ? tools.length : 0}`);
+
   if (!extensionWs || extensionWs.readyState !== extensionWs.OPEN) {
     return res.status(503).json({ error: { code: 'NO_EXTENSION', message: 'Extension not connected' } });
+  }
+
+  // 注入 tool 定义到最后一条用户消息（仅首轮，tool result 轮不重复注入）
+  const isToolResultRound = messages.some(m => m.role === 'tool' || m.role === 'tool_result');
+  if (hasTools && !isToolResultRound) {
+    const toolPrompt = buildToolSystemPrompt(tools);
+    messages = [...messages];
+    const lastUserIdx = messages.findLastIndex(m => m.role === 'user');
+    if (lastUserIdx >= 0) {
+      messages[lastUserIdx] = {
+        ...messages[lastUserIdx],
+        content: toolPrompt + '\n\nUser request: ' + messages[lastUserIdx].content
+      };
+    }
   }
 
   const task_id = uuidv4();
   console.log(`[Dispatch] task_id=${task_id}, sending to extension...`);
 
-  // SSE headers
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
-  activeTasks.set(task_id, { res, format, task_id, model });
+  activeTasks.set(task_id, { res, format, task_id, model, hasTools, buffer: '' });
 
   extensionWs.send(JSON.stringify({
     type: 'task', task_id, model, messages, stream: true, new_chat: newChat
   }));
   console.log(`[Dispatch] task sent to extension`);
 
-  // 客户端断开时清理
   res.on('close', () => activeTasks.delete(task_id));
 }
 
 // --- OpenAI 兼容接口 ---
 app.post('/v1/chat/completions', (req, res) => {
-  const { model = 'gpt-4', messages = [] } = req.body;
-  // 自动判断：只有1条用户消息（可能有system）视为新对话
+  const { model = 'gpt-4', messages = [], tools } = req.body;
   const userMsgs = messages.filter(m => m.role === 'user');
-  const newChat = req.body.new_chat ?? (userMsgs.length <= 1);
-  dispatchTask(res, 'openai', model, messages, newChat);
+  const hasToolResults = messages.some(m => m.role === 'tool');
+  // 有 tool 结果说明是工具回传，不开新对话
+  const newChat = req.body.new_chat ?? (!hasToolResults && userMsgs.length <= 1);
+  dispatchTask(res, 'openai', model, messages, newChat, filterTools(tools));
 });
 
 // --- Anthropic 兼容接口 ---
 app.post('/v1/messages', (req, res) => {
-  const { model = 'claude', messages: rawMsgs = [] } = req.body;
+  const { model = 'claude', messages: rawMsgs = [], tools } = req.body;
   const userMsgs = rawMsgs.filter(m => m.role === 'user');
-  const newChat = req.body.new_chat ?? (userMsgs.length <= 1);
-  // Anthropic content 可能是数组，统一转为字符串
+  const hasToolResults = rawMsgs.some(m => m.role === 'tool_result' || m.role === 'tool');
+  const newChat = req.body.new_chat ?? (!hasToolResults && userMsgs.length <= 1);
   const messages = rawMsgs.map(m => ({
     role: m.role,
     content: Array.isArray(m.content)
       ? m.content.map(b => b.text || '').join('')
       : m.content
   }));
-  dispatchTask(res, 'anthropic', model, messages, new_chat);
+  dispatchTask(res, 'anthropic', model, messages, newChat, filterTools(tools));
 });
 
 // --- 健康检查 ---

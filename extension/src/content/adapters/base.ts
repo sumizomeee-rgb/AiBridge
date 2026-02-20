@@ -6,7 +6,7 @@ export interface AiAdapter {
   /** 模拟输入文本并发送 */
   sendMessage(text: string): Promise<void>;
   /** 监听 AI 回复，增量回调 */
-  observeResponse(onChunk: (delta: string) => void, onDone: () => void): void;
+  observeResponse(onChunk: (delta: string) => void, onDone: (fullText: string) => void): void;
   /** 停止监听 */
   stopObserve(): void;
 }

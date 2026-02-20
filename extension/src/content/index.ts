@@ -23,7 +23,7 @@ async function handleTask(adapter: AiAdapter, task: TaskMessage) {
 
     adapter.observeResponse(
       (delta) => chrome.runtime.sendMessage({ type: 'chunk', task_id: task.task_id, delta }),
-      () => chrome.runtime.sendMessage({ type: 'done', task_id: task.task_id }),
+      (fullText) => chrome.runtime.sendMessage({ type: 'done', task_id: task.task_id, fullText }),
     );
   } catch (err: any) {
     chrome.runtime.sendMessage({ type: 'error', task_id: task.task_id, code: 'DOM_TIMEOUT', message: err.message });
