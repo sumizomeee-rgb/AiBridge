@@ -238,16 +238,25 @@ function filterTools(tools) {
   return filtered.length ? filtered : null;
 }
 
-function buildToolSystemPrompt(tools) {
+function extractCwd(messages) {
+  for (const m of messages) {
+    const text = typeof m.content === 'string' ? m.content : '';
+    const match = text.match(/Working directory:\s*(.+)/i) || text.match(/current directory[:\s]+(.+)/i);
+    if (match) return match[1].trim().replace(/\\/g, '\\\\');
+  }
+  return null;
+}
+
+function buildToolSystemPrompt(tools, cwd) {
   const defs = tools.map(t => {
     const f = t.function || t;
     const params = Object.keys(f.parameters?.properties || {}).join(', ');
     return `- ${f.name}: ${(f.description || '').slice(0, 120)}${params ? `\n  Params: ${params}` : ''}`;
   }).join('\n');
-  return `You have the following tools:
+  return `${cwd ? `You are working in directory: ${cwd}\nIMPORTANT: All file paths MUST be based on this directory. Do NOT invent or guess paths.\n` : ''}You have the following tools:
 ${defs}
 
-When you need a tool, output this XML (no other text):
+Do NOT use built-in tools (Python, code interpreter, etc). ONLY use the XML format below:
 <tool_call>
 {"name": "ACTUAL_TOOL_NAME", "arguments": {"param": "value"}}
 </tool_call>
@@ -268,13 +277,13 @@ function dispatchTask(res, format, model, messages, newChat, tools) {
   // 注入 tool 定义到最后一条用户消息（仅首轮，tool result 轮不重复注入）
   const isToolResultRound = messages.some(m => m.role === 'tool' || m.role === 'tool_result');
   if (hasTools && !isToolResultRound) {
-    const toolPrompt = buildToolSystemPrompt(tools);
+    const toolPrompt = buildToolSystemPrompt(tools, extractCwd(messages));
     messages = [...messages];
     const lastUserIdx = messages.findLastIndex(m => m.role === 'user');
     if (lastUserIdx >= 0) {
       messages[lastUserIdx] = {
         ...messages[lastUserIdx],
-        content: toolPrompt + '\n\nUser request: ' + messages[lastUserIdx].content
+        content: messages[lastUserIdx].content + '\n\n' + toolPrompt
       };
     }
   }

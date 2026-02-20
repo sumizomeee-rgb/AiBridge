@@ -59,7 +59,8 @@ export class GenericAdapter implements AiAdapter {
     const tick = () => {
       const currentCount = this.countReplyElements();
       // 始终用全部新回复元素的拼接文本，避免 DOM 重构导致单元素丢失内容
-      const text = this.collectNewReplyText() || this.findLastReplyRaw()?.innerText || '';
+      const raw = this.findLastReplyRaw();
+      const text = this.collectNewReplyText() || (raw ? this.extractText(raw) : '');
 
       if (!started && currentCount <= this.prevReplyCount && text === this.prevReplyText) return;
 
@@ -70,7 +71,9 @@ export class GenericAdapter implements AiAdapter {
         this.lastLength = text.length;
       } else if (started) {
         noChangeCount++;
-        if (noChangeCount >= 20) {
+        // 检测生成是否已结束（发送按钮可用 or 停止按钮消失）
+        const idle = this.isGenerationIdle();
+        if (noChangeCount >= 20 || (idle && noChangeCount >= 6)) {
           this.stopObserve();
           onDone(text);
         }
@@ -85,14 +88,49 @@ export class GenericAdapter implements AiAdapter {
     if (this.observer) { this.observer.disconnect(); this.observer = null; }
   }
 
+  /** 提取文本，保留 <tool_call> 标签（浏览器会把它当 HTML 元素吃掉） */
+  private extractText(el: HTMLElement): string {
+    if (!el.getElementsByTagName('tool_call').length) return el.innerText;
+    const clone = el.cloneNode(true) as HTMLElement;
+    for (const tc of Array.from(clone.getElementsByTagName('tool_call'))) {
+      tc.replaceWith(`<tool_call>${tc.textContent}</tool_call>`);
+    }
+    return clone.innerText;
+  }
+
+  /** 检测页面是否已停止生成（停止按钮消失 or 发送按钮可用） */
+  private isGenerationIdle(): boolean {
+    // 有"停止"按钮说明还在生成
+    const stops = document.querySelectorAll('button');
+    for (const btn of stops) {
+      const t = (btn.textContent || '').toLowerCase();
+      const a = (btn.getAttribute('aria-label') || '').toLowerCase();
+      if (t.includes('stop') || t.includes('停止') || a.includes('stop') || a.includes('停止')) return false;
+    }
+    // 输入框可用说明生成结束
+    const input = this.findInput();
+    if (input && !input.closest('[disabled]') && !(input as any).disabled) return true;
+    return false;
+  }
+
+  /** 判断元素是否是 AI 回复（排除页面 UI 组件） */
+  private isReplyElement(el: HTMLElement): boolean {
+    const text = el.innerText || '';
+    if (text.length < 2) return false;
+    // 排除文件上传区、输入框附近的 UI 元素
+    if (/拖放文件|文件数量|文件类型|drop.*file/i.test(text) && text.length < 200) return false;
+    if (el.closest('textarea, [contenteditable], [class*="upload"], [class*="input-area"], [class*="chat-input"]')) return false;
+    return true;
+  }
+
   /** 收集 prevReplyCount 之后出现的所有新回复元素文本 */
   private collectNewReplyText(): string {
     const selectors = ['[class*="markdown"]', '[class*="message-content"]', '[class*="response"]', '[class*="answer"]', '[class*="assistant"]', '[class*="bot"]'];
     for (const sel of selectors) {
-      const els = document.querySelectorAll(sel);
+      const els = this.filterReplies(document.querySelectorAll(sel));
       if (els.length > this.prevReplyCount) {
-        return Array.from(els).slice(this.prevReplyCount)
-          .map(el => (el as HTMLElement).innerText).join('\n');
+        return els.slice(this.prevReplyCount)
+          .map(el => this.extractText(el)).join('\n');
       }
     }
     return '';
@@ -101,7 +139,7 @@ export class GenericAdapter implements AiAdapter {
   private countReplyElements(): number {
     const selectors = ['[class*="markdown"]', '[class*="message-content"]', '[class*="response"]', '[class*="answer"]', '[class*="assistant"]', '[class*="bot"]'];
     for (const sel of selectors) {
-      const n = document.querySelectorAll(sel).length;
+      const n = this.filterReplies(document.querySelectorAll(sel)).length;
       if (n) return n;
     }
     return 0;
@@ -118,14 +156,15 @@ export class GenericAdapter implements AiAdapter {
       '[class*="bot"]',
     ];
     for (const sel of selectors) {
-      const els = document.querySelectorAll(sel);
-      if (els.length) {
-        console.log(`[GenericAdapter] findLastReplyRaw: matched "${sel}" (${els.length} els)`);
-        return els[els.length - 1] as HTMLElement;
-      }
+      const els = this.filterReplies(document.querySelectorAll(sel));
+      if (els.length) return els[els.length - 1];
     }
     console.log('[GenericAdapter] findLastReplyRaw: NO MATCH');
     return null;
+  }
+
+  private filterReplies(nodeList: NodeListOf<Element>): HTMLElement[] {
+    return Array.from(nodeList).filter(el => this.isReplyElement(el as HTMLElement)) as HTMLElement[];
   }
 
   private findInput(): HTMLElement | null {
