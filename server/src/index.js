@@ -253,12 +253,23 @@ function buildToolSystemPrompt(tools, cwd) {
     const params = Object.keys(f.parameters?.properties || {}).join(', ');
     return `- ${f.name}: ${(f.description || '').slice(0, 120)}${params ? `\n  Params: ${params}` : ''}`;
   }).join('\n');
-  return `${cwd ? `You are working in directory: ${cwd}\nIMPORTANT: All file paths MUST be based on this directory. Do NOT invent or guess paths.\n` : ''}You have the following tools:
+  return `You are a coding agent. ${cwd ? `Working directory: ${cwd}` : ''}
+
+Rules:
+- NEVER guess file content. Always read a file before editing it.
+- Use absolute paths based on the working directory. Do NOT invent paths.
+- Only make changes directly requested. Do not add unnecessary code, comments, or refactoring.
+- When editing, preserve existing indentation and style.
+- Do NOT use built-in tools (Python, code interpreter, etc).
+- Each tool call must be a separate XML block. Multiple calls = multiple blocks.
+- Respond concisely. Explain what you did briefly after using tools.
+
+Tools available:
 ${defs}
 
-Do NOT use built-in tools (Python, code interpreter, etc). ONLY use the XML format below:
+ONLY use this XML format to call tools:
 <tool_call>
-{"name": "ACTUAL_TOOL_NAME", "arguments": {"param": "value"}}
+{"name": "TOOL_NAME", "arguments": {"param": "value"}}
 </tool_call>
 
 Backslashes in strings MUST be doubled: C:\\\\Users not C:\\Users`;
@@ -340,3 +351,17 @@ server.listen(PORT, () => {
   console.log(`[Server] Running on http://localhost:${PORT}`);
   console.log(`[Server] WebSocket ready on ws://localhost:${PORT}`);
 });
+
+// --- Graceful Shutdown ---
+function shutdown() {
+  console.log('\n[Server] Shutting down...');
+  for (const [id, task] of activeTasks) {
+    try { task.res.end(); } catch {}
+  }
+  activeTasks.clear();
+  if (extensionWs) try { extensionWs.close(); } catch {}
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 2000);
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
