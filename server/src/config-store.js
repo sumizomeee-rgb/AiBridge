@@ -24,6 +24,7 @@ function normalizeProvider(provider) {
   const baseUrl = String(provider.baseUrl || provider.url || '').replace(/\/$/, '');
   const sessionId = String(provider.sessionId || '').trim();
   const startUrl = String(provider.startUrl || '').trim();
+  const defaultResponseSettleMs = id === 'deepseek' ? 20000 : 12000;
 
   return {
     id,
@@ -45,6 +46,7 @@ function normalizeProvider(provider) {
     healthPrompt: provider.healthPrompt || '请只回复 ok',
     readyTimeoutMs: Number(provider.readyTimeoutMs || 20000),
     taskTimeoutMs: Number(provider.taskTimeoutMs || 120000),
+    responseSettleMs: Number(provider.responseSettleMs || defaultResponseSettleMs),
     idleTtlMs: Number(provider.idleTtlMs || 600000),
     newChat: provider.newChat === true,
   };

@@ -325,6 +325,7 @@ function bindEvents() {
       browserMode: 'headless',
       healthPrompt: '请只回复 ok',
       taskTimeoutMs: 120000,
+      responseSettleMs: 12000,
       idleTtlMs: 600000,
       enabled: true,
       newChat: false,

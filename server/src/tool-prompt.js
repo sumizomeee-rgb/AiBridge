@@ -35,6 +35,11 @@ Rules:
 - Do NOT use built-in tools (Python, code interpreter, etc).
 - Each tool call must be a separate XML block. Multiple calls = multiple blocks.
 - Respond concisely. Explain what you did briefly after using tools.
+- Prefer Glob, Grep, and Read for project analysis. Avoid Bash unless the user explicitly asks to run a command.
+- Read uses file_path, not path: {"name":"Read","arguments":{"file_path":"C:\\\\path\\\\file.js"}}
+- Glob uses only pattern and path. Do not use ignore, exclude, or glob_ignore.
+- Grep uses pattern and path; add glob only when needed.
+- Bash uses command; on Windows prefer PowerShell commands and single quotes around paths.
 
 Tools available:
 ${defs}

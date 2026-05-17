@@ -181,6 +181,7 @@ export class PlaywrightDriver {
   async waitForDetection(page, provider, timeoutMs = 15000) {
     const startedAt = Date.now();
     let latest = null;
+    let inputReadySeenAt = null;
     while (Date.now() - startedAt < timeoutMs) {
       try {
         latest = await this.adapter.detect(page);
@@ -196,7 +197,13 @@ export class PlaywrightDriver {
           blockedHints: /region-ban|security|blocked|forbidden/i.test(url),
         };
       }
-      if (latest.inputReady || latest.blockedHints || latest.loginHints) return latest;
+      if (latest.blockedHints || latest.loginHints) return latest;
+      if (latest.inputReady) {
+        inputReadySeenAt ||= Date.now();
+        if (Date.now() - inputReadySeenAt >= 2000) return latest;
+      } else {
+        inputReadySeenAt = null;
+      }
       await sleep(500);
     }
     return latest || await this.adapter.detect(page);
@@ -272,6 +279,7 @@ export class PlaywrightDriver {
           baseline,
           { onChunk: task.onChunk },
           provider.taskTimeoutMs || 120000,
+          provider.responseSettleMs || 12000,
         );
         session.lastStatus = 'available';
         session.lastError = null;

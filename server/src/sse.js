@@ -202,14 +202,28 @@ function normalizeToolCall(parsed, allowedToolNames) {
   const lowerName = String(parsed.name).toLowerCase();
   if (lowerName === 'tool_name') return null;
   if (allowedToolNames.size && !allowedToolNames.has(lowerName)) return null;
+  let args = parsed.arguments;
+  if (typeof args === 'string') args = repairJson(args) || args;
+  if (args && typeof args === 'object' && !Array.isArray(args)) {
+    if (['read', 'write', 'edit'].includes(lowerName) && args.path && !args.file_path) {
+      args.file_path = args.path;
+      delete args.path;
+    }
+    if (lowerName === 'bash' && args.cmd && !args.command) {
+      args.command = args.cmd;
+      delete args.cmd;
+    }
+    if (lowerName === 'glob') {
+      delete args.ignore;
+      delete args.exclude;
+    }
+  }
   return {
     id: `call_${uuidv4().slice(0, 8)}`,
     type: 'function',
     function: {
       name: allowedToolNames.get(lowerName) || parsed.name,
-      arguments: typeof parsed.arguments === 'string'
-        ? parsed.arguments
-        : JSON.stringify(parsed.arguments || {}),
+      arguments: typeof args === 'string' ? args : JSON.stringify(args || {}),
     },
   };
 }
@@ -225,7 +239,9 @@ function parseParameterToolCalls(text, allowedToolNames) {
     while ((paramMatch = paramRegex.exec(match[2])) !== null) {
       args[paramMatch[1]] = decodeXmlText(paramMatch[2]);
     }
-    const normalized = normalizeToolCall({ name: match[1], arguments: args }, allowedToolNames);
+    const body = decodeXmlText(match[2]);
+    const bodyJson = Object.keys(args).length ? null : repairJson(body);
+    const normalized = normalizeToolCall({ name: match[1], arguments: bodyJson || args }, allowedToolNames);
     if (normalized) calls.push(normalized);
   }
   return calls;
