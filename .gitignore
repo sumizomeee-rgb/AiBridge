@@ -2,3 +2,6 @@ node_modules/
 *.log
 nul
 .claude/
+server/profiles/
+server/data/config.json
+server/data/tasks.jsonl

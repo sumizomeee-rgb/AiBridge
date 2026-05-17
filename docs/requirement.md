@@ -1,5 +1,7 @@
 # WebAI-Bridge (Manifest V3) - 主开发蓝图与架构设计文档
 
+> 历史文档：本文件记录的是早期 Chrome Extension + WebSocket 方案。当前实现已切换为 Server-only + Playwright，扩展目录和运行时 WebSocket fallback 已删除；新的实施规格见 `docs/headless-admin-spec.md`。
+
 ## 1. 项目概述与核心定位
 **WebAI-Bridge** 是一款基于 Chrome Manifest V3 的开发者工具集，由“本地 Node.js 网关服务”与“浏览器插件”两部分组成。
 它的核心目标是：将主流网页端 AI（如 ChatGPT, 豆包, Claude, 通义千问）无缝封装为本地标准的 OpenAI (`/v1/chat/completions`) 和 Anthropic 兼容接口，供外部 Agent（如 Dify, NextChat, Open-Interpreter）零成本、自动化调用。
@@ -26,7 +28,7 @@
 
 
 ### 3.1 核心数据流：
-1. **Agent 客户端**发起 HTTP POST 请求到 `http://localhost:1337/v1/chat/completions`。
+1. **Agent 客户端**发起 HTTP POST 请求到 `http://localhost:9529/v1/chat/completions`。
 2. **Local Server** 接收请求，生成唯一 `task_id`，将 HTTP 请求挂起（Pending），并将数据转换为内部 JSON 格式。
 3. **Local Server** 通过 WebSocket 将任务下发给已连接的 **Chrome Extension (Background Script)**。
 4. **Background Script** 根据路由策略（Auto/Override）找到对应的浏览器 Tab。
@@ -41,7 +43,7 @@
 
 ### 4.1 模块一：Local Server (本地网关)
 **职责：** 协议伪装、WebSocket 维护、流式转发。
-- **端口配置：** HTTP 服务和 WebSocket 服务均监听 `1337` 端口。
+- **端口配置：** HTTP 服务和 WebSocket 服务均监听 `9529` 端口。
 - **跨域处理：** 必须设置全局 CORS 允许所有来源 `Access-Control-Allow-Origin: *`，否则 Web 端 Agent 无法调用。
 - **请求暂存机制：** 维护一个 Map：`activeTasks = new Map<String(taskId), ResponseObject>()`。WebSocket 收到插件返回的数据时，通过 taskId 找到对应的 HTTP `res` 对象进行输出。
 
