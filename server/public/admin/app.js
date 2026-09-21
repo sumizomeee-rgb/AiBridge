@@ -1,389 +1,181 @@
-let state = {
-  overview: null,
-  selectedProviderId: null,
-  selectedRouteId: null,
-  view: 'overview',
+const $ = (selector) => document.querySelector(selector);
+let state = { sources: [], keys: [], logs: [], gateway: {} };
+
+const statusLabels = {
+  healthy: "可用", unchecked: "待检测", unconfigured: "未配置", unsupported: "未接入",
+  auth_expired: "鉴权失效", challenge: "风控拦截", protocol_mismatch: "协议异常",
+  network_error: "网络异常", upstream_error: "上游错误", invalid_config: "配置不完整",
+  rate_limited: "上游限流",
 };
 
-const $ = (selector) => document.querySelector(selector);
-const $$ = (selector) => Array.from(document.querySelectorAll(selector));
+function escapeHtml(value = "") {
+  return String(value).replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char]));
+}
 
 async function api(path, options = {}) {
-  const response = await fetch(`/admin/api${path}`, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
-    body: options.body ? JSON.stringify(options.body) : undefined,
-  });
+  const response = await fetch(path, { headers: { "content-type": "application/json", ...(options.headers || {}) }, ...options });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error?.message || response.statusText);
+  if (!response.ok) throw new Error(data.detail || data.error?.message || `请求失败（HTTP ${response.status}）`);
   return data;
 }
 
-function toast(message) {
-  const el = $('#toast');
-  el.textContent = message;
-  el.classList.remove('hidden');
-  setTimeout(() => el.classList.add('hidden'), 3200);
+function toast(message, error = false) {
+  const node = $("#toast");
+  node.textContent = message;
+  node.className = error ? "show error" : "show";
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => { node.className = ""; }, 3200);
 }
 
-function statusPill(status, enabled = true) {
-  if (!enabled) return '<span class="pill muted">停用</span>';
-  if (!status || status.lastStatus === 'idle') return '<span class="pill muted">未启动</span>';
-  if (status.lastStatus === 'available' || status.lastStatus === 'visible_session') return '<span class="pill ok">可用</span>';
-  if (status.lastStatus === 'needs_login' || status.lastStatus === 'dom_unready') return '<span class="pill warn">待处理</span>';
-  return '<span class="pill bad">异常</span>';
+function sourceCard(source) {
+  const statusClass = statusLabels[source.health_status] ? source.health_status : "error";
+  const initials = source.name.replace(/\s*Web|\s*官方/g, "").slice(0, 2).toUpperCase();
+  const models = source.models.filter((x) => x.enabled).map((x) => `<span class="model-tag">${escapeHtml(x.public_name)}</span>`).join("") || `<span class="muted">暂无公开模型</span>`;
+  return `<article class="source-card ${source.enabled ? "" : "disabled"}" data-source="${escapeHtml(source.id)}">
+    <div class="card-top"><div class="card-title"><div class="provider-icon">${escapeHtml(initials)}</div><div><strong>${escapeHtml(source.name)}</strong><small>${source.kind === "web" ? "官网直连" : source.protocol.toUpperCase() + " COMPATIBLE"}</small></div></div><span class="status ${statusClass}">${escapeHtml(statusLabels[source.health_status] || "异常")}</span></div>
+    <p class="card-message">${escapeHtml(source.health_message || "尚未检测")}${source.last_checked_at ? `<br><small>${escapeHtml(formatTime(source.last_checked_at))}</small>` : ""}</p>
+    <div class="models">${models}</div>
+    <div class="card-actions"><button data-action="health">健康测试</button><button data-action="edit">配置</button>${source.kind === "api" && source.protocol === "openai" ? `<button data-action="discover">同步模型</button>` : ""}${source.kind === "api" ? `<button class="danger" data-action="delete">删除</button>` : ""}</div>
+  </article>`;
 }
 
-function shortUrl(url) {
-  if (!url) return '-';
-  return url.replace(/^https?:\/\//, '').replace(/\/$/, '');
-}
-
-async function loadOverview() {
-  state.overview = await api('/overview');
-  $('#serverPort').textContent = `:${state.overview.server.port || 9529}`;
-  const origin = state.overview.server.localOrigin || window.location.origin;
-  $('#openaiBaseUrl').textContent = `${origin}/v1`;
-  $('#anthropicBaseUrl').textContent = origin;
-  if (!state.selectedProviderId) state.selectedProviderId = state.overview.providers[0]?.id || null;
-  if (!state.selectedRouteId) state.selectedRouteId = state.overview.routes[0]?.id || null;
-  renderAll();
-}
-
-function setView(view) {
-  state.view = view;
-  $$('.view').forEach(el => el.classList.toggle('active', el.id === `view-${view}`));
-  $$('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.view === view));
-  const titles = { overview: '总览', providers: '平台', routes: '模型路由', keys: 'API Key', tasks: '任务日志' };
-  $('#pageTitle').textContent = titles[view] || '总览';
-}
-
-function renderMetrics() {
-  const providers = state.overview.providers;
-  const sessions = state.overview.sessions;
-  const running = providers.filter(provider => sessions[provider.id]?.running).length;
-  const available = providers.filter(provider => sessions[provider.id]?.lastStatus === 'available').length;
-  const keys = state.overview.keys.filter(key => key.enabled !== false).length;
-  $('#metrics').innerHTML = [
-    ['平台', providers.length],
-    ['运行会话', running],
-    ['可用平台', available],
-    ['启用 Key', keys],
-  ].map(([label, value]) => `<div class="metric"><span>${label}</span><strong>${value}</strong></div>`).join('');
-}
-
-function renderOverviewProviders() {
-  const providers = state.overview.providers;
-  const sessions = state.overview.sessions;
-  $('#overviewProviders').innerHTML = providers.map(provider => {
-    const status = sessions[provider.id] || {};
-    return `
-      <tr>
-        <td><strong>${provider.name}</strong><br><span class="muted-text">${provider.id}</span></td>
-        <td>${provider.browserMode}</td>
-        <td>${statusPill(status, provider.enabled)}</td>
-        <td>${shortUrl(provider.startUrl || provider.baseUrl)}</td>
-        <td>${status.lastError || '-'}</td>
-        <td>
-          <div class="row-actions">
-            <button data-action="check" data-id="${provider.id}">检测</button>
-            <button data-action="open" data-id="${provider.id}">登录</button>
-          </div>
-        </td>
-      </tr>
-    `;
-  }).join('');
-}
-
-function renderProviders() {
-  const providers = state.overview.providers;
-  const sessions = state.overview.sessions;
-  $('#providerList').innerHTML = providers.map(provider => {
-    const active = provider.id === state.selectedProviderId ? 'active' : '';
-    return `
-      <div class="provider-row ${active}" data-provider-id="${provider.id}">
-        <div>
-          <strong>${provider.name}</strong>
-          <span>${shortUrl(provider.startUrl || provider.baseUrl)}</span>
-        </div>
-        ${statusPill(sessions[provider.id], provider.enabled)}
-      </div>
-    `;
-  }).join('');
-  renderProviderForm();
-}
-
-function fillForm(form, data) {
-  Array.from(form.elements).forEach(input => {
-    if (!input.name) return;
-    if (input.type === 'checkbox') input.checked = data[input.name] !== false;
-    else input.value = data[input.name] ?? '';
-  });
-}
-
-function readForm(form) {
-  const data = {};
-  Array.from(form.elements).forEach(input => {
-    if (!input.name) return;
-    if (input.type === 'checkbox') data[input.name] = input.checked;
-    else if (input.type === 'number') data[input.name] = Number(input.value || 0);
-    else data[input.name] = input.value.trim();
-  });
-  return data;
-}
-
-function renderProviderForm() {
-  const provider = state.overview.providers.find(item => item.id === state.selectedProviderId)
-    || state.overview.providers[0];
-  if (!provider) return;
-  state.selectedProviderId = provider.id;
-  fillForm($('#providerForm'), provider);
-  const status = state.overview.sessions[provider.id] || {};
-  $('#providerDiagnostic').textContent = JSON.stringify({
-      provider: provider.id,
-      status,
-      profileDir: provider.profileDir,
-      cookieSessionName: provider.cookieSessionName || null,
-      sessionIdConfigured: Boolean(provider.sessionId),
-      proxyEnabled: Boolean(provider.proxyEnabled),
-      proxyConfigured: Boolean(provider.proxyServer),
-  }, null, 2);
-}
-
-function renderRouteProviderOptions() {
-  $('#routeProviderSelect').innerHTML = state.overview.providers
-    .map(provider => `<option value="${provider.id}">${provider.name} (${provider.id})</option>`)
-    .join('');
-}
-
-function renderRoutes() {
-  renderRouteProviderOptions();
-  $('#routeRows').innerHTML = state.overview.routes.map(route => {
-    const provider = state.overview.providers.find(item => item.id === route.providerId);
-    const active = route.id === state.selectedRouteId ? ' class="selected-row"' : '';
-    return `
-      <tr data-route-id="${route.id}"${active}>
-        <td><strong>${route.pattern}</strong><br><span>${route.id}</span></td>
-        <td>${route.type}</td>
-        <td>${provider?.name || route.providerId}</td>
-        <td>${route.priority}</td>
-        <td>${route.enabled ? '<span class="pill ok">启用</span>' : '<span class="pill muted">停用</span>'}</td>
-      </tr>
-    `;
-  }).join('');
-  renderRouteForm();
-}
-
-function renderRouteForm() {
-  const route = state.overview.routes.find(item => item.id === state.selectedRouteId)
-    || state.overview.routes[0]
-    || { id: '', type: 'contains', pattern: '', providerId: state.overview.providers[0]?.id || '', priority: 0, enabled: true, newChat: false };
-  state.selectedRouteId = route.id;
-  fillForm($('#routeForm'), route);
+function renderSources() {
+  const web = state.sources.filter((x) => x.kind === "web");
+  const apis = state.sources.filter((x) => x.kind === "api");
+  $("#web-sources").innerHTML = web.map(sourceCard).join("") || `<div class="empty">没有 Web 来源</div>`;
+  $("#api-sources").innerHTML = apis.map(sourceCard).join("") || `<div class="empty">还没有标准 API，点击右上角添加。</div>`;
 }
 
 function renderKeys() {
-  $('#keyRows').innerHTML = state.overview.keys.map(key => `
-    <tr>
-      <td>${key.name}</td>
-      <td><code>${key.prefix}</code></td>
-      <td>${key.enabled ? '<span class="pill ok">启用</span>' : '<span class="pill muted">停用</span>'}</td>
-      <td>${key.createdAt || '-'}</td>
-      <td>${key.lastUsedAt || '-'}</td>
-      <td>
-        <div class="row-actions">
-          <button data-action="toggle-key" data-id="${key.id}" data-enabled="${key.enabled}">${key.enabled ? '禁用' : '启用'}</button>
-          <button data-action="delete-key" data-id="${key.id}">删除</button>
-        </div>
-      </td>
-    </tr>
-  `).join('');
+  $("#keys").innerHTML = state.keys.length ? state.keys.map((key) => `<div class="list-row"><div><strong>${escapeHtml(key.name)}</strong><br><code>${escapeHtml(key.prefix)}••••••••</code></div><small>${key.last_used_at ? `最后使用 ${escapeHtml(formatTime(key.last_used_at))}` : "尚未使用"}</small><button class="danger" data-key-delete="${escapeHtml(key.id)}">删除</button></div>`).join("") : `<div class="empty">尚未生成网关 Token</div>`;
 }
 
-function renderTasks() {
-  const tasks = state.overview.recentTasks || [];
-  $('#taskRows').innerHTML = tasks.map(task => `
-    <tr>
-      <td>${task.loggedAt || '-'}</td>
-      <td>${task.status === 'ok' ? '<span class="pill ok">成功</span>' : '<span class="pill bad">失败</span>'}</td>
-      <td>${task.model || '-'}</td>
-      <td>${task.providerId || '-'}</td>
-      <td>${task.elapsedMs ?? '-'} ms</td>
-      <td>${task.message || task.code || '-'}</td>
-    </tr>
-  `).join('');
+function formatTime(value) {
+  if (!value) return "—";
+  return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date(value));
 }
 
-function renderAll() {
-  if (!state.overview) return;
-  renderMetrics();
-  renderOverviewProviders();
-  renderProviders();
-  renderRoutes();
-  renderKeys();
-  renderTasks();
+function renderLogs() {
+  $("#logs-body").innerHTML = state.logs.length ? state.logs.map((log) => `<tr><td>${escapeHtml(formatTime(log.created_at))}</td><td><strong>${escapeHtml(log.model_name)}</strong><br><small>${escapeHtml(log.source_name)}</small></td><td>${escapeHtml(log.protocol)}</td><td class="${log.status === "ok" ? "ok" : "fail"}">${log.status === "ok" ? "成功" : "失败"}</td><td>${log.latency_ms == null ? "—" : `${log.latency_ms} ms`}</td><td>${escapeHtml(log.error || "—")}</td></tr>`).join("") : `<tr><td colspan="6" class="empty">尚无请求记录</td></tr>`;
 }
 
-async function checkProvider(id) {
-  toast('正在检测平台...');
-  const result = await api(`/providers/${id}/check`, { method: 'POST', body: {} });
-  $('#providerDiagnostic').textContent = JSON.stringify(result, null, 2);
-  await loadOverview();
-  toast(result.ok ? '检测通过' : '检测完成，平台需要处理');
+async function load() {
+  state = await api("/api/state");
+  $("#lan-url").textContent = state.gateway.lan_url;
+  $("#local-url").textContent = state.gateway.local_url;
+  renderSources(); renderKeys(); renderLogs();
 }
 
-async function openSession(id) {
-  toast('正在打开会话窗口...');
-  const result = await api(`/providers/${id}/open-session`, { method: 'POST', body: {} });
-  $('#providerDiagnostic').textContent = JSON.stringify(result, null, 2);
-  await loadOverview();
-  toast('会话窗口已打开');
+function modelLines(source) {
+  return (source?.models || []).map((model) => `${model.public_name} = ${model.upstream_name}`).join("\n");
 }
 
-async function saveProvider() {
-  const data = readForm($('#providerForm'));
-  if (!data.id) return toast('平台 ID 不能为空');
-  const existing = state.overview.providers.some(provider => provider.id === data.id);
-  if (existing) await api(`/providers/${data.id}`, { method: 'PATCH', body: data });
-  else await api('/providers', { method: 'POST', body: data });
-  state.selectedProviderId = data.id;
-  await loadOverview();
-  toast('平台已保存');
+function openSource(source = null) {
+  const isWeb = source?.kind === "web";
+  $("#source-id").value = source?.id || "";
+  $("#source-kind").value = source?.kind || "api";
+  $("#dialog-title").textContent = source ? `配置 ${source.name}` : "添加标准 API";
+  $("#dialog-kicker").textContent = isWeb ? "WEB SOURCE" : "API SOURCE";
+  $("#source-name").value = source?.name || "";
+  $("#source-protocol").value = source?.protocol === "openai" ? "openai" : "anthropic";
+  $("#source-base").value = source?.base_url || "";
+  $("#source-api-key").value = "";
+  $("#source-auth").value = source?.config?.auth_mode || "bearer";
+  $("#source-enabled").checked = source?.enabled ?? true;
+  $("#source-curl").value = "";
+  $("#source-cookie").value = "";
+  $("#source-models").value = modelLines(source);
+  $("#web-fields").hidden = !isWeb;
+  $("#protocol-wrap").hidden = isWeb;
+  $("#base-wrap").hidden = isWeb;
+  $("#api-key-wrap").hidden = isWeb;
+  $("#auth-wrap").hidden = isWeb;
+  $("#web-guide").textContent = source?.config?.guide || "";
+  $("#model-help").textContent = isWeb ? "Web 来源只使用第一行；公开名可改，上游名通常保持不变" : "每行：公开名 = 上游模型名";
+  $("#source-dialog").showModal();
 }
 
-async function saveRoute() {
-  const data = readForm($('#routeForm'));
-  if (!data.id) data.id = `route-${Date.now()}`;
-  const existing = state.overview.routes.some(route => route.id === data.id);
-  if (existing) await api(`/routes/${data.id}`, { method: 'PATCH', body: data });
-  else await api('/routes', { method: 'POST', body: data });
-  state.selectedRouteId = data.id;
-  await loadOverview();
-  toast('路由已保存');
-}
-
-function bindEvents() {
-  $$('.nav-item').forEach(button => {
-    button.addEventListener('click', () => setView(button.dataset.view));
+function parseModels(text, existing = []) {
+  return text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line, index) => {
+    const [publicName, ...rest] = line.split("=");
+    const upstream = rest.join("=").trim() || publicName.trim();
+    const old = existing.find((x) => x.public_name === publicName.trim()) || existing[index];
+    return { id: old?.id, public_name: publicName.trim(), upstream_name: upstream, enabled: true };
   });
+}
 
-  $('#refreshBtn').addEventListener('click', () => loadOverview().then(() => toast('已刷新')));
-  $('#reloadTasksBtn').addEventListener('click', () => loadOverview().then(() => toast('任务已刷新')));
-  $('#checkAllBtn').addEventListener('click', async () => {
-    for (const provider of state.overview.providers.filter(item => item.enabled)) {
-      await api(`/providers/${provider.id}/check`, { method: 'POST', body: {} }).catch(() => null);
+$("#source-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const id = $("#source-id").value;
+  const kind = $("#source-kind").value;
+  const old = state.sources.find((x) => x.id === id);
+  const models = parseModels($("#source-models").value, old?.models || []);
+  if (!models.length) return toast("至少配置一个模型映射", true);
+  const body = { name: $("#source-name").value.trim(), kind, enabled: $("#source-enabled").checked };
+  if (kind === "web") {
+    Object.assign(body, { protocol: old.protocol, base_url: old.base_url, config: old.config, curl: $("#source-curl").value.trim(), credential: { cookie: $("#source-cookie").value.trim() }, model: models[0] });
+  } else {
+    Object.assign(body, { protocol: $("#source-protocol").value, base_url: $("#source-base").value.trim(), config: { auth_mode: $("#source-auth").value, anthropic_version: "2023-06-01" }, models });
+    const key = $("#source-api-key").value.trim();
+    if (key) body.credential = { api_key: key };
+  }
+  try {
+    await api(id ? `/api/sources/${id}` : "/api/sources", { method: id ? "PUT" : "POST", body: JSON.stringify(body) });
+    $("#source-dialog").close();
+    toast("来源配置已保存");
+    await load();
+  } catch (error) { toast(error.message, true); }
+});
+
+document.addEventListener("click", async (event) => {
+  const close = event.target.closest("[data-close]");
+  if (close) return $("#source-dialog").close();
+  if (event.target.closest("[data-close-token]")) return $("#token-dialog").close();
+  const copy = event.target.closest("[data-copy]");
+  if (copy) {
+    await navigator.clipboard.writeText(document.getElementById(copy.dataset.copy).textContent);
+    return toast("已复制到剪贴板");
+  }
+  const keyDelete = event.target.closest("[data-key-delete]");
+  if (keyDelete) {
+    if (!confirm("确定删除这个 Token？使用它的客户端会立即失效。")) return;
+    await api(`/api/keys/${keyDelete.dataset.keyDelete}`, { method: "DELETE" });
+    return load();
+  }
+  const card = event.target.closest("[data-source]");
+  const action = event.target.closest("[data-action]")?.dataset.action;
+  if (!card || !action) return;
+  const source = state.sources.find((x) => x.id === card.dataset.source);
+  if (action === "edit") return openSource(source);
+  if (action === "delete") {
+    if (!confirm(`确定删除“${source.name}”及其全部模型映射？`)) return;
+    await api(`/api/sources/${source.id}`, { method: "DELETE" });
+    toast("来源已删除"); return load();
+  }
+  const button = event.target.closest("button");
+  button.disabled = true;
+  try {
+    if (action === "health") {
+      const result = await api(`/api/sources/${source.id}/health`, { method: "POST", body: "{}" });
+      toast(`${source.name}：${result.message}`, result.status !== "healthy");
+    } else if (action === "discover") {
+      const result = await api(`/api/sources/${source.id}/discover-models`, { method: "POST", body: "{}" });
+      toast(`发现 ${result.models.length} 个模型；打开配置后可添加公开映射。`);
     }
-    await loadOverview();
-    toast('全部检测完成');
-  });
+    await load();
+  } catch (error) { toast(error.message, true); button.disabled = false; }
+});
 
-  document.addEventListener('click', async (event) => {
-    const target = event.target;
-    const providerRow = target.closest?.('[data-provider-id]');
-    if (providerRow) {
-      state.selectedProviderId = providerRow.dataset.providerId;
-      renderProviders();
-    }
+$("#add-api").addEventListener("click", () => openSource());
+$("#refresh").addEventListener("click", () => load().then(() => toast("状态已刷新")).catch((error) => toast(error.message, true)));
+$("#create-key").addEventListener("click", async () => {
+  try {
+    const result = await api("/api/keys", { method: "POST", body: JSON.stringify({ name: $("#key-name").value.trim() || "本地 Token" }) });
+    $("#new-token").textContent = result.token;
+    $("#token-dialog").showModal();
+    $("#key-name").value = "";
+    await load();
+  } catch (error) { toast(error.message, true); }
+});
 
-    const routeRow = target.closest?.('[data-route-id]');
-    if (routeRow) {
-      state.selectedRouteId = routeRow.dataset.routeId;
-      renderRoutes();
-    }
-
-    if (target.dataset?.action === 'check') await checkProvider(target.dataset.id);
-    if (target.dataset?.action === 'open') await openSession(target.dataset.id);
-    if (target.dataset?.action === 'toggle-key') {
-      await api(`/keys/${target.dataset.id}`, {
-        method: 'PATCH',
-        body: { enabled: target.dataset.enabled !== 'true' },
-      });
-      await loadOverview();
-    }
-    if (target.dataset?.action === 'delete-key') {
-      await api(`/keys/${target.dataset.id}`, { method: 'DELETE' });
-      await loadOverview();
-    }
-  });
-
-  $('#newProviderBtn').addEventListener('click', () => {
-    state.selectedProviderId = null;
-    fillForm($('#providerForm'), {
-      id: '',
-      name: '',
-      baseUrl: '',
-      startUrl: '',
-      sessionId: '',
-      cookieSessionName: '',
-      profileDir: '',
-      proxyEnabled: false,
-      proxyServer: '',
-      proxyUsername: '',
-      proxyPassword: '',
-      adapter: 'generic',
-      browserChannel: '',
-      browserMode: 'headless',
-      healthPrompt: '请只回复 ok',
-      taskTimeoutMs: 120000,
-      responseSettleMs: 12000,
-      idleTtlMs: 600000,
-      enabled: true,
-      newChat: false,
-    });
-  });
-
-  $('#saveProviderBtn').addEventListener('click', saveProvider);
-  $('#checkProviderBtn').addEventListener('click', () => checkProvider($('#providerForm').elements.id.value));
-  $('#openSessionBtn').addEventListener('click', () => openSession($('#providerForm').elements.id.value));
-  $('#closeSessionBtn').addEventListener('click', async () => {
-    await api(`/providers/${$('#providerForm').elements.id.value}/close-session`, { method: 'POST', body: {} });
-    await loadOverview();
-    toast('会话已关闭');
-  });
-  $('#resetSessionBtn').addEventListener('click', async () => {
-    const id = $('#providerForm').elements.id.value;
-    if (!id) return;
-    await api(`/providers/${id}/reset-session`, { method: 'POST', body: {} });
-    await loadOverview();
-    toast('Profile 已重置');
-  });
-
-  $('#newRouteBtn').addEventListener('click', () => {
-    state.selectedRouteId = null;
-    fillForm($('#routeForm'), {
-      id: '',
-      type: 'contains',
-      pattern: '',
-      providerId: state.overview.providers[0]?.id || '',
-      priority: 0,
-      enabled: true,
-      newChat: false,
-    });
-  });
-  $('#saveRouteBtn').addEventListener('click', saveRoute);
-  $('#routePreviewBtn').addEventListener('click', async () => {
-    const model = $('#routePreviewInput').value.trim();
-    const result = await api('/routes/preview', { method: 'POST', body: { model } });
-    $('#routePreviewResult').textContent = result.provider
-      ? `命中 ${result.provider.name} / ${result.route.pattern}`
-      : '未命中';
-  });
-
-  $('#createKeyBtn').addEventListener('click', async () => {
-    const result = await api('/keys', {
-      method: 'POST',
-      body: {
-        name: $('#newKeyName').value.trim() || '本地 Key',
-        rateLimitPerMinute: Number($('#newKeyRate').value || 0),
-      },
-    });
-    $('#createdKey').textContent = result.key;
-    $('#keyReveal').classList.remove('hidden');
-    await loadOverview();
-    toast('Key 已创建');
-  });
-}
-
-bindEvents();
-setView('overview');
-loadOverview().catch(error => toast(error.message));
+load().catch((error) => toast(`无法加载控制台：${error.message}`, true));

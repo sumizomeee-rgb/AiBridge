@@ -1,259 +1,94 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AiBridge Admin</title>
-  <link rel="stylesheet" href="./styles.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>AiBridge 控制台</title>
+  <link rel="stylesheet" href="/assets/styles.css">
 </head>
 <body>
-  <div class="shell">
-    <aside class="sidebar">
-      <div class="brand">
-        <div class="brand-mark">AB</div>
-        <div>
-          <strong>AiBridge</strong>
-          <span>Local console</span>
-        </div>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">AB</span><div><strong>AiBridge</strong><small>LOCAL AI GATEWAY</small></div></div>
+    <div class="live"><i></i> 管理服务运行中 · 7009</div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div>
+        <p class="eyebrow">统一入口 / 双协议兼容</p>
+        <h1>一个地址，接入所有模型。</h1>
+        <p class="lede">局域网内的 Agent 只需要网关地址、Token 和公开模型名。OpenAI 与 Anthropic 客户端可直接复用同一套路由。</p>
       </div>
-      <nav class="nav">
-        <button class="nav-item active" data-view="overview">总览</button>
-        <button class="nav-item" data-view="providers">平台</button>
-        <button class="nav-item" data-view="routes">模型路由</button>
-        <button class="nav-item" data-view="keys">API Key</button>
-        <button class="nav-item" data-view="tasks">任务日志</button>
-      </nav>
-      <div class="sidebar-foot">
-        <span id="serverPort">:9529</span>
+      <div class="endpoint-panel">
+        <div class="endpoint"><span>局域网 Base URL</span><code id="lan-url">读取中…</code><button data-copy="lan-url">复制</button></div>
+        <div class="endpoint"><span>本机 Base URL</span><code id="local-url">读取中…</code><button data-copy="local-url">复制</button></div>
+        <p>OpenAI 使用 <b>/v1/chat/completions</b>，Anthropic 使用 <b>/v1/messages</b>。</p>
       </div>
-    </aside>
+    </section>
 
-    <main class="main">
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">Server-only bridge</p>
-          <h1 id="pageTitle">总览</h1>
-        </div>
-        <div class="top-actions">
-          <button class="ghost" id="refreshBtn">刷新</button>
-          <a class="ghost link-button" href="/health" target="_blank">Health JSON</a>
-        </div>
-      </header>
+    <nav class="section-nav">
+      <a href="#sources">来源</a><a href="#tokens">访问 Token</a><a href="#logs">最近请求</a>
+    </nav>
 
-      <div id="toast" class="toast hidden"></div>
+    <section id="sources" class="block">
+      <div class="section-head"><div><p class="eyebrow">UPSTREAMS</p><h2>模型来源</h2></div><button class="primary" id="add-api">＋ 添加标准 API</button></div>
+      <div class="subhead"><h3>Web 官网直连</h3><span>每个网站对外提供一个公开模型名</span></div>
+      <div id="web-sources" class="source-grid"><div class="skeleton"></div><div class="skeleton"></div></div>
+      <div class="subhead api-head"><h3>标准 API</h3><span>一个来源可映射多个模型</span></div>
+      <div id="api-sources" class="source-grid"></div>
+    </section>
 
-      <section class="view active" id="view-overview">
-        <div class="metrics" id="metrics"></div>
-        <section class="panel">
-          <div class="panel-head">
-            <h2>平台状态</h2>
-            <button class="primary" id="checkAllBtn">检测全部</button>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>平台</th>
-                  <th>模式</th>
-                  <th>状态</th>
-                  <th>入口</th>
-                  <th>最近错误</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody id="overviewProviders"></tbody>
-            </table>
-          </div>
-        </section>
-      </section>
+    <section id="tokens" class="block split-block">
+      <div>
+        <p class="eyebrow">ACCESS</p><h2>网关 Token</h2>
+        <p class="muted">下游客户端可用 <code>Authorization: Bearer</code> 或 <code>x-api-key</code>。明文 Token 只展示一次。</p>
+      </div>
+      <div class="token-actions"><input id="key-name" placeholder="例如：Claude Code"><button class="primary" id="create-key">生成 Token</button></div>
+      <div id="keys" class="list full"></div>
+    </section>
 
-      <section class="view" id="view-providers">
-        <div class="split">
-          <section class="panel">
-            <div class="panel-head">
-              <h2>已有平台</h2>
-              <button class="primary" id="newProviderBtn">新建平台</button>
-            </div>
-            <div id="providerList" class="provider-list"></div>
-          </section>
+    <section id="logs" class="block">
+      <div class="section-head"><div><p class="eyebrow">OBSERVABILITY</p><h2>最近请求</h2></div><button class="quiet" id="refresh">刷新</button></div>
+      <div class="table-wrap"><table><thead><tr><th>时间</th><th>模型 / 来源</th><th>协议</th><th>状态</th><th>耗时</th><th>说明</th></tr></thead><tbody id="logs-body"></tbody></table></div>
+    </section>
+  </main>
 
-          <section class="panel editor">
-            <div class="panel-head">
-              <h2>平台配置</h2>
-              <button class="primary" id="saveProviderBtn">保存</button>
-            </div>
-            <p class="help-text">这里配置某个网页 AI 的入口、登录态和浏览器 profile；点击“打开会话窗口”后可以在网页里手动选择模型、专家/快速等模式，profile 会记住这些状态。真正暴露给客户端的模型名在“模型路由”里配置。</p>
-            <form id="providerForm" class="form-grid">
-              <label>平台 ID<input name="id" required></label>
-              <label>显示名称<input name="name" required></label>
-              <label>基础 URL<input name="baseUrl" required placeholder="https://www.doubao.com"></label>
-              <label>起始 URL<input name="startUrl" placeholder="可选，不填则使用基础 URL"></label>
-              <label>Cookie sessionId<input name="sessionId" placeholder="从 F12 Cookie 复制"></label>
-              <label>Cookie 名<input name="cookieSessionName" placeholder="豆包默认 sessionId"></label>
-              <label>Profile 目录<input name="profileDir" placeholder="profiles/doubao"></label>
-              <label class="checkline"><input name="proxyEnabled" type="checkbox">启用代理</label>
-              <label>代理地址<input name="proxyServer" placeholder="可选，如 127.0.0.1:7897"></label>
-              <label>代理用户名<input name="proxyUsername" placeholder="可选"></label>
-              <label>代理密码<input name="proxyPassword" type="password" placeholder="可选"></label>
-              <label>适配器
-                <select name="adapter">
-                  <option value="generic">generic</option>
-                </select>
-              </label>
-              <label>浏览器通道
-                <select name="browserChannel">
-                  <option value="">自动</option>
-                  <option value="bundled">Playwright Chromium</option>
-                  <option value="chrome">本机 Google Chrome</option>
-                  <option value="msedge">本机 Microsoft Edge</option>
-                </select>
-              </label>
-              <label>浏览器模式
-                <select name="browserMode">
-                  <option value="headless">headless</option>
-                  <option value="always_visible">always_visible</option>
-                </select>
-              </label>
-              <label>健康检查 Prompt<input name="healthPrompt"></label>
-              <label>任务超时 ms<input name="taskTimeoutMs" type="number" min="10000" step="1000"></label>
-              <label>响应稳定等待 ms<input name="responseSettleMs" type="number" min="3000" step="1000"></label>
-              <label>空闲回收 ms<input name="idleTtlMs" type="number" min="30000" step="1000"></label>
-              <label class="checkline"><input name="enabled" type="checkbox">启用</label>
-              <label class="checkline"><input name="newChat" type="checkbox">每次请求新开对话</label>
-            </form>
-            <div class="button-row">
-              <button class="ghost" id="checkProviderBtn">检测</button>
-              <button class="ghost" id="openSessionBtn">打开会话窗口（设置模型/模式）</button>
-              <button class="ghost" id="closeSessionBtn">关闭会话</button>
-              <button class="danger" id="resetSessionBtn">重置 Profile</button>
-            </div>
-            <pre class="diagnostic" id="providerDiagnostic">选择一个平台查看状态。</pre>
-          </section>
-        </div>
-      </section>
+  <dialog id="source-dialog">
+    <form method="dialog" id="source-form">
+      <div class="dialog-head"><div><p class="eyebrow" id="dialog-kicker">SOURCE</p><h2 id="dialog-title">编辑来源</h2></div><button type="button" class="icon-button" data-close>×</button></div>
+      <input type="hidden" id="source-id">
+      <input type="hidden" id="source-kind">
+      <div class="form-grid">
+        <label>显示名称<input id="source-name" required></label>
+        <label id="protocol-wrap">上游协议<select id="source-protocol"><option value="anthropic">Anthropic 兼容</option><option value="openai">OpenAI 兼容</option></select></label>
+        <label class="wide" id="base-wrap">上游 Base URL<input id="source-base" placeholder="https://api.example.com"></label>
+        <label class="wide" id="api-key-wrap">上游 API Token<input id="source-api-key" type="password" autocomplete="off" placeholder="留空则保留现有 Token"></label>
+        <label id="auth-wrap">Anthropic 鉴权方式<select id="source-auth"><option value="bearer">Authorization Bearer</option><option value="x-api-key">x-api-key</option></select></label>
+        <label class="toggle"><input id="source-enabled" type="checkbox"><span>启用此来源</span></label>
+      </div>
 
-      <section class="view" id="view-routes">
-        <div class="split routes-split">
-          <section class="panel">
-            <div class="panel-head">
-              <h2>模型路由</h2>
-              <button class="primary" id="newRouteBtn">新建路由</button>
-            </div>
-            <p class="help-text">这里配置的是 API 请求体里的 <code>model</code> 名称。比如外部客户端传 <code>Ency</code>，就可以在这里映射到豆包。</p>
-            <div class="route-preview">
-              <input id="routePreviewInput" placeholder="输入 model 试算，如 Ency">
-              <button class="ghost" id="routePreviewBtn">试算</button>
-              <span id="routePreviewResult"></span>
-            </div>
-            <div class="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>外部 model</th>
-                    <th>匹配方式</th>
-                    <th>目标</th>
-                    <th>优先级</th>
-                    <th>状态</th>
-                  </tr>
-                </thead>
-                <tbody id="routeRows"></tbody>
-              </table>
-            </div>
-          </section>
-          <section class="panel editor">
-            <div class="panel-head">
-              <h2>路由配置</h2>
-              <button class="primary" id="saveRouteBtn">保存</button>
-            </div>
-            <p class="help-text">“匹配值”就是客户端要填的模型名或模型名片段；“目标平台”是最终打开哪个网页 AI。</p>
-            <form id="routeForm" class="form-grid">
-              <label>路由 ID<input name="id"></label>
-              <label>匹配类型
-                <select name="type">
-                  <option value="exact">exact</option>
-                  <option value="contains">contains</option>
-                  <option value="regex">regex</option>
-                </select>
-              </label>
-              <label>外部 model / 匹配值<input name="pattern" placeholder="例如 Ency 或 doubao"></label>
-              <label>目标平台<select name="providerId" id="routeProviderSelect"></select></label>
-              <label>优先级<input name="priority" type="number"></label>
-              <label class="checkline"><input name="enabled" type="checkbox">启用</label>
-              <label class="checkline"><input name="newChat" type="checkbox">命中后新开对话</label>
-            </form>
-          </section>
-        </div>
-      </section>
+      <div id="web-fields" hidden>
+        <div class="guide" id="web-guide"></div>
+        <label>完整 Copy as cURL（推荐）<textarea id="source-curl" rows="6" placeholder="curl 'https://...' -H 'cookie: ...'"></textarea></label>
+        <label>Cookie（如上面已含 Cookie 可留空）<textarea id="source-cookie" rows="3" placeholder="name=value; name2=value2"></textarea></label>
+      </div>
 
-      <section class="view" id="view-keys">
-        <section class="panel">
-          <div class="panel-head">
-            <h2>API Key</h2>
-            <button class="primary" id="createKeyBtn">新建 Key</button>
-          </div>
-          <div class="api-base-grid">
-            <div class="api-base-card">
-              <span>OpenAI 兼容 Base URL</span>
-              <code id="openaiBaseUrl">http://localhost:9529/v1</code>
-              <small>Chat Completions endpoint: /v1/chat/completions</small>
-            </div>
-            <div class="api-base-card">
-              <span>Anthropic 兼容 Base URL</span>
-              <code id="anthropicBaseUrl">http://localhost:9529</code>
-              <small>Messages endpoint: /v1/messages</small>
-            </div>
-          </div>
-          <div class="key-create">
-            <input id="newKeyName" placeholder="Key 名称，例如 opencode">
-            <input id="newKeyRate" type="number" min="0" placeholder="每分钟限制，0 为不限">
-          </div>
-          <div id="keyReveal" class="key-reveal hidden">
-            <span>新 Key 仅显示一次</span>
-            <code id="createdKey"></code>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>名称</th>
-                  <th>前缀</th>
-                  <th>状态</th>
-                  <th>创建时间</th>
-                  <th>最后使用</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody id="keyRows"></tbody>
-            </table>
-          </div>
-        </section>
-      </section>
+      <div class="model-editor">
+        <div class="subhead"><h3>模型映射</h3><span id="model-help">每行：公开名 = 上游名</span></div>
+        <textarea id="source-models" rows="5" placeholder="my-model = upstream-model"></textarea>
+      </div>
+      <div class="dialog-actions"><button type="button" class="quiet" data-close>取消</button><button type="submit" class="primary">保存配置</button></div>
+    </form>
+  </dialog>
 
-      <section class="view" id="view-tasks">
-        <section class="panel">
-          <div class="panel-head">
-            <h2>最近任务</h2>
-            <button class="ghost" id="reloadTasksBtn">重新加载</button>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>时间</th>
-                  <th>状态</th>
-                  <th>模型</th>
-                  <th>平台</th>
-                  <th>耗时</th>
-                  <th>错误</th>
-                </tr>
-              </thead>
-              <tbody id="taskRows"></tbody>
-            </table>
-          </div>
-        </section>
-      </section>
-    </main>
-  </div>
-  <script src="./app.js" type="module"></script>
+  <dialog id="token-dialog" class="token-dialog">
+    <div class="dialog-head"><div><p class="eyebrow">CREATED</p><h2>请立即复制 Token</h2></div><button class="icon-button" data-close-token>×</button></div>
+    <p>关闭后无法再次查看；遗失时请删除并重新生成。</p>
+    <div class="secret"><code id="new-token"></code><button data-copy="new-token">复制</button></div>
+  </dialog>
+
+  <div id="toast" role="status"></div>
+  <script type="module" src="/assets/app.js"></script>
 </body>
 </html>
