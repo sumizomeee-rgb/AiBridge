@@ -58,6 +58,15 @@ def _private_client(host: str | None) -> bool:
         return False
 
 
+def _loopback_client(host: str | None) -> bool:
+    if not host or host in {"testclient", "localhost"}:
+        return True
+    try:
+        return ipaddress.ip_address(host.removeprefix("::ffff:")).is_loopback
+    except ValueError:
+        return False
+
+
 def _openai_error(message: str, status: int = 400, code: str = "invalid_request_error") -> JSONResponse:
     return JSONResponse({"error": {"message": message, "type": code, "param": None, "code": code}}, status_code=status)
 
@@ -180,10 +189,11 @@ def create_admin_app() -> FastAPI:
     app = FastAPI(title="AiBridge Admin", version="2.0.0", docs_url=None, redoc_url=None)
 
     @app.get("/api/state")
-    async def state():
+    async def state(request: Request):
         lan = _lan_ip()
         return {
             "gateway": {"local_url": f"http://127.0.0.1:{settings.gateway_port}", "lan_url": f"http://{lan}:{settings.gateway_port}", "admin_url": f"http://127.0.0.1:{settings.admin_port}"},
+            "permissions": {"source_toggle": _loopback_client(request.client.host if request.client else None)},
             "sources": storage.list_sources(), "keys": storage.list_keys(), "logs": storage.list_logs(),
         }
 
@@ -228,6 +238,7 @@ def create_admin_app() -> FastAPI:
             if body.get("credential", {}).get("cookie"):
                 parsed["cookie"] = body["credential"]["cookie"]
             body["credential"] = parsed
+        body["enabled"] = old["enabled"]
         merged = {**old, **body}
         storage.save_source(merged, source_id)
         model = body.get("model")
@@ -240,6 +251,19 @@ def create_admin_app() -> FastAPI:
                 saved_model_ids.append(storage.save_model(source_id, item["public_name"], item.get("upstream_name") or item["public_name"], item.get("enabled", True), item.get("id")))
             storage.delete_models_except(source_id, saved_model_ids)
         return {"ok": True}
+
+    @app.patch("/api/sources/{source_id}/enabled")
+    async def toggle_source(source_id: str, request: Request):
+        if not _loopback_client(request.client.host if request.client else None):
+            raise HTTPException(403, "来源开关仅允许在本机 127.0.0.1 管理台操作")
+        source = storage.get_source(source_id)
+        if not source:
+            raise HTTPException(404, "来源不存在")
+        body = await request.json()
+        if type(body.get("enabled")) is not bool:
+            raise HTTPException(400, "enabled 必须是布尔值")
+        storage.set_source_enabled(source_id, body["enabled"])
+        return {"ok": True, "enabled": body["enabled"]}
 
     @app.delete("/api/sources/{source_id}")
     async def delete_source(source_id: str):

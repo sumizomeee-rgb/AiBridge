@@ -1,5 +1,5 @@
 const $ = (selector) => document.querySelector(selector);
-let state = { sources: [], keys: [], logs: [], gateway: {} };
+let state = { sources: [], keys: [], logs: [], gateway: {}, permissions: {} };
 
 const statusLabels = {
   healthy: "可用", unchecked: "待检测", unconfigured: "未配置", unsupported: "未接入",
@@ -54,6 +54,13 @@ function iconButton(action, icon, label, className = "") {
   return `<button class="icon-action ${className}" data-action="${action}" data-tooltip="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${icons[icon]}</button>`;
 }
 
+function sourceSwitch(source) {
+  const canToggle = Boolean(state.permissions?.source_toggle);
+  const stateLabel = source.enabled ? "已启用" : "已停用";
+  const hint = canToggle ? `${stateLabel}，点击切换` : `${stateLabel}；仅可在本机 127.0.0.1 操作`;
+  return `<span class="switch-wrap" data-tooltip="${escapeHtml(hint)}"><button class="source-switch ${source.enabled ? "active" : ""}" type="button" role="switch" aria-checked="${source.enabled}" aria-label="${escapeHtml(source.name)}：${stateLabel}" data-source-enable="${escapeHtml(source.id)}" ${canToggle ? "" : "disabled"}><span></span></button></span>`;
+}
+
 function sourceCard(source) {
   const statusClass = statusLabels[source.health_status] ? source.health_status : "error";
   const initials = source.name.replace(/\s*Web|\s*官方/g, "").slice(0, 2).toUpperCase();
@@ -68,7 +75,7 @@ function sourceCard(source) {
     <div class="source-identity"><div class="provider-icon">${providerMark}</div><div><strong>${escapeHtml(source.name)}</strong><small>${escapeHtml(type)} · ${escapeHtml(source.base_url)}</small></div></div>
     <div class="models">${models}</div>
     <div class="source-health"><span class="status ${statusClass}"><i></i>${escapeHtml(statusLabels[source.health_status] || "异常")}</span><span class="health-copy">${escapeHtml(source.health_message || "尚未检测")}</span>${source.last_checked_at ? `<time>${escapeHtml(formatTime(source.last_checked_at))}</time>` : ""}</div>
-    <div class="row-actions">${actions.join("")}</div>
+    <div class="row-actions">${sourceSwitch(source)}${actions.join("")}</div>
   </article>`;
 }
 
@@ -98,6 +105,18 @@ async function load() {
   renderSources(); renderKeys(); renderLogs();
 }
 
+function setLogsCollapsed(collapsed, remember = true) {
+  $("#logs-content").hidden = collapsed;
+  const button = $("#logs-toggle");
+  button.setAttribute("aria-expanded", String(!collapsed));
+  button.setAttribute("aria-label", collapsed ? "展开请求记录" : "折叠请求记录");
+  button.dataset.tooltip = collapsed ? "展开请求记录" : "折叠请求记录";
+  button.classList.toggle("collapsed", collapsed);
+  if (remember) {
+    try { localStorage.setItem("aibridge.logs.collapsed", collapsed ? "1" : "0"); } catch { /* 浏览器禁用存储时保持当前状态 */ }
+  }
+}
+
 function modelLines(source) {
   return (source?.models || []).map((model) => `${model.public_name} = ${model.upstream_name}`).join("\n");
 }
@@ -113,7 +132,6 @@ function openSource(source = null) {
   $("#source-base").value = source?.base_url || "";
   $("#source-api-key").value = "";
   $("#source-auth").value = source?.config?.auth_mode || "bearer";
-  $("#source-enabled").checked = source?.enabled ?? true;
   $("#source-curl").value = "";
   $("#source-cookie").value = "";
   $("#source-models").value = modelLines(source);
@@ -125,7 +143,6 @@ function openSource(source = null) {
   $("#base-wrap").hidden = false;
   $("#api-key-wrap").hidden = isWeb;
   $("#auth-wrap").hidden = isWeb;
-  $("#enabled-wrap").hidden = isWeb;
   $("#api-icon-editor").hidden = isWeb;
   $("#api-model-editor").hidden = isWeb;
   $("#base-label").textContent = isWeb ? "官网地址" : "上游 Base URL";
@@ -149,7 +166,7 @@ $("#source-form").addEventListener("submit", async (event) => {
   const id = $("#source-id").value;
   const kind = $("#source-kind").value;
   const old = state.sources.find((x) => x.id === id);
-  const body = { name: $("#source-name").value.trim(), kind, enabled: $("#source-enabled").checked };
+  const body = { name: $("#source-name").value.trim(), kind, enabled: old?.enabled ?? true };
   if (kind === "web") {
     const previous = old.models[0];
     const publicName = $("#web-public-name").value.trim();
@@ -195,6 +212,21 @@ document.addEventListener("click", async (event) => {
     await api(`/api/keys/${keyDelete.dataset.keyDelete}`, { method: "DELETE" });
     return load();
   }
+  const sourceEnable = event.target.closest("[data-source-enable]");
+  if (sourceEnable) {
+    if (!state.permissions?.source_toggle) return toast("来源开关仅可在本机 127.0.0.1 操作", true);
+    const source = state.sources.find((x) => x.id === sourceEnable.dataset.sourceEnable);
+    if (!source) return;
+    sourceEnable.disabled = true;
+    try {
+      await api(`/api/sources/${source.id}/enabled`, { method: "PATCH", body: JSON.stringify({ enabled: !source.enabled }) });
+      toast(`${source.name}已${source.enabled ? "停用" : "启用"}`);
+      return load();
+    } catch (error) {
+      sourceEnable.disabled = false;
+      return toast(error.message, true);
+    }
+  }
   const card = event.target.closest("[data-source]");
   const action = event.target.closest("[data-action]")?.dataset.action;
   if (!card || !action) return;
@@ -221,6 +253,7 @@ document.addEventListener("click", async (event) => {
 
 $("#add-api").addEventListener("click", () => openSource());
 $("#refresh").addEventListener("click", () => load().then(() => toast("状态已刷新")).catch((error) => toast(error.message, true)));
+$("#logs-toggle").addEventListener("click", () => setLogsCollapsed(!$("#logs-content").hidden));
 $("#create-key").addEventListener("click", async () => {
   try {
     const result = await api("/api/keys", { method: "POST", body: JSON.stringify({ name: $("#key-name").value.trim() || "本地 Token" }) });
@@ -231,4 +264,7 @@ $("#create-key").addEventListener("click", async () => {
   } catch (error) { toast(error.message, true); }
 });
 
+let initialLogsCollapsed = false;
+try { initialLogsCollapsed = localStorage.getItem("aibridge.logs.collapsed") === "1"; } catch { /* 浏览器禁用存储时默认展开 */ }
+setLogsCollapsed(initialLogsCollapsed, false);
 load().catch((error) => toast(`无法加载控制台：${error.message}`, true));

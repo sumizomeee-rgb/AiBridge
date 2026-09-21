@@ -233,6 +233,10 @@ class Storage:
         with self._connect() as db:
             db.execute("DELETE FROM sources WHERE id=?", (source_id,))
 
+    def set_source_enabled(self, source_id: str, enabled: bool) -> None:
+        with self._connect() as db:
+            db.execute("UPDATE sources SET enabled=?,updated_at=? WHERE id=?", (int(enabled), now_iso(), source_id))
+
     def update_health(self, source_id: str, status: str, message: str) -> None:
         with self._connect() as db:
             stamp = now_iso()

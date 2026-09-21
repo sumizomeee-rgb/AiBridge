@@ -14,7 +14,10 @@ def main() -> None:
         assert page.locator('link[rel="icon"]').get_attribute("href") == "/assets/favicon.svg"
         assert page.locator("#lan-url").is_visible()
         assert page.locator("#local-url").count() == 0
+        assert page.get_by_role("heading", name="统一模型入口").is_visible()
+        assert page.get_by_text("一个地址，接入所有模型。").count() == 0
         assert page.locator(".source-row").count() >= 5
+        assert page.locator(".source-switch").count() == page.locator(".source-row").count()
         assert page.locator(".source-row .provider-icon svg").count() >= 5
         deepseek = page.locator(".source-row", has_text="DeepSeek 官方")
         assert deepseek.locator(".status").inner_text() == "可用"
@@ -41,6 +44,20 @@ def main() -> None:
         assert page.locator("#api-icon-editor").is_visible()
         assert page.locator("#source-icon-svg").input_value() == ""
         page.locator("[data-close]").first.click()
+        kimi = page.locator(".source-row", has_text="Kimi Web")
+        kimi_switch = kimi.get_by_role("switch")
+        initial_enabled = kimi_switch.get_attribute("aria-checked")
+        toggled_enabled = "false" if initial_enabled == "true" else "true"
+        kimi_switch.click()
+        page.wait_for_function(f"document.querySelector('[data-source=\"web-kimi\"] [role=\"switch\"]')?.getAttribute('aria-checked') === '{toggled_enabled}'")
+        page.locator(".source-row", has_text="Kimi Web").get_by_role("switch").click()
+        page.wait_for_function(f"document.querySelector('[data-source=\"web-kimi\"] [role=\"switch\"]')?.getAttribute('aria-checked') === '{initial_enabled}'")
+        page.locator("#logs-toggle").click()
+        assert not page.locator("#logs-content").is_visible()
+        page.reload(wait_until="networkidle")
+        assert not page.locator("#logs-content").is_visible()
+        page.locator("#logs-toggle").click()
+        assert page.locator("#logs-content").is_visible()
         page.screenshot(path=f"{temp_dir}/admin-smoke.png", full_page=True)
         browser.close()
     if console_errors:

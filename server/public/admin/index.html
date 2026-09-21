@@ -15,16 +15,13 @@
   </header>
 
   <main>
-    <section class="hero">
-      <div>
-        <p class="eyebrow">统一入口 / 双协议兼容</p>
-        <h1>一个地址，接入所有模型。</h1>
-        <p class="lede">局域网内的 Agent 只需要网关地址、Token 和公开模型名。OpenAI 与 Anthropic 客户端可直接复用同一套路由。</p>
-      </div>
+    <section class="overview">
+      <div class="overview-copy"><h1>统一模型入口</h1><p>把 Web 会话与标准 API 收进同一个局域网地址。</p></div>
+      <div class="protocol-stamp" aria-label="兼容协议"><span>OpenAI</span><i></i><span>Anthropic</span></div>
     </section>
 
     <section id="sources" class="block">
-      <div class="section-head"><div><p class="eyebrow">来源</p><h2>模型连接</h2></div><button class="primary" id="add-api">＋ 添加 API</button></div>
+      <div class="section-head"><div><h2>模型连接</h2><p>管理官网会话与标准 API 来源</p></div><button class="primary" id="add-api">＋ 添加 API</button></div>
       <div class="subhead"><h3>Web 官网直连</h3><span>一个网站对应一个公开模型名</span></div>
       <div id="web-sources" class="source-list"><div class="skeleton"></div><div class="skeleton"></div></div>
       <div class="subhead api-head"><h3>标准 API</h3><span>支持多个模型映射</span></div>
@@ -43,9 +40,15 @@
       <div id="keys" class="list"></div>
     </section>
 
-    <section id="logs" class="block">
-      <div class="section-head"><div><p class="eyebrow">记录</p><h2>最近请求</h2></div><button class="icon-action" id="refresh" data-tooltip="刷新请求记录" aria-label="刷新请求记录"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg></button></div>
-      <div class="table-wrap"><table><thead><tr><th>时间</th><th>模型 / 来源</th><th>协议</th><th>状态</th><th>耗时</th><th>说明</th></tr></thead><tbody id="logs-body"></tbody></table></div>
+    <section id="logs" class="block logs-block">
+      <div class="section-head logs-head">
+        <div><h2>最近请求</h2><p>查看最新 40 条网关调用</p></div>
+        <div class="head-actions">
+          <button class="icon-action" id="refresh" data-tooltip="刷新请求记录" aria-label="刷新请求记录"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg></button>
+          <button class="icon-action logs-toggle" id="logs-toggle" aria-expanded="true" aria-controls="logs-content" data-tooltip="折叠请求记录" aria-label="折叠请求记录"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>
+        </div>
+      </div>
+      <div id="logs-content"><div class="table-wrap"><table><thead><tr><th>时间</th><th>模型 / 来源</th><th>协议</th><th>状态</th><th>耗时</th><th>说明</th></tr></thead><tbody id="logs-body"></tbody></table></div></div>
     </section>
   </main>
 
@@ -60,7 +63,6 @@
         <label class="wide" id="base-wrap"><span id="base-label">上游 Base URL</span><input id="source-base" placeholder="https://api.example.com"></label>
         <label class="wide" id="api-key-wrap">上游 API Token<input id="source-api-key" type="password" autocomplete="off" placeholder="留空则保留现有 Token"></label>
         <label id="auth-wrap">Anthropic 鉴权方式<select id="source-auth"><option value="bearer">Authorization Bearer</option><option value="x-api-key">x-api-key</option></select></label>
-        <label class="toggle" id="enabled-wrap"><input id="source-enabled" type="checkbox"><span>启用此来源</span></label>
       </div>
 
       <div id="web-fields" hidden>
