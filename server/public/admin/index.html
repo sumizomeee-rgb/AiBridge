@@ -15,13 +15,8 @@
   </header>
 
   <main>
-    <section class="overview">
-      <div class="overview-copy"><h1>统一模型入口</h1><p>把 Web 会话与标准 API 收进同一个局域网地址。</p></div>
-      <div class="protocol-stamp" aria-label="兼容协议"><span>OpenAI</span><i></i><span>Anthropic</span></div>
-    </section>
-
-    <section id="sources" class="block">
-      <div class="section-head"><div><h2>模型连接</h2><p>管理官网会话与标准 API 来源</p></div><button class="primary" id="add-api">＋ 添加 API</button></div>
+    <section id="sources" class="sources-block">
+      <div class="page-head"><div><h1>模型连接</h1><p>Web 会话与标准 API 共用一个网关，兼容 OpenAI / Anthropic。</p></div><button class="primary" id="add-api">＋ 添加 API</button></div>
       <div class="subhead"><h3>Web 官网直连</h3><span>一个网站对应一个公开模型名</span></div>
       <div id="web-sources" class="source-list"><div class="skeleton"></div><div class="skeleton"></div></div>
       <div class="subhead api-head"><h3>标准 API</h3><span>支持多个模型映射</span></div>
@@ -31,7 +26,7 @@
     <section id="tokens" class="block access-block">
       <div class="access-head">
         <div><h3>网关接入</h3><p>局域网客户端共用同一个地址与 Token</p></div>
-        <div class="access-endpoint"><span>Base URL</span><code id="lan-url">读取中…</code><button data-copy="lan-url">复制</button></div>
+        <div class="access-endpoint"><span><i></i>Base URL</span><code id="lan-url">读取中…</code><button data-copy="lan-url">复制</button></div>
       </div>
       <div class="access-body">
         <div class="protocol-paths"><span>OpenAI <code>/v1/chat/completions</code></span><span>Anthropic <code>/v1/messages</code></span></div>
@@ -48,7 +43,7 @@
           <button class="icon-action logs-toggle" id="logs-toggle" aria-expanded="true" aria-controls="logs-content" data-tooltip="折叠请求记录" aria-label="折叠请求记录"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>
         </div>
       </div>
-      <div id="logs-content"><div class="table-wrap"><table><thead><tr><th>时间</th><th>模型 / 来源</th><th>协议</th><th>状态</th><th>耗时</th><th>说明</th></tr></thead><tbody id="logs-body"></tbody></table></div></div>
+      <div id="logs-content" class="collapse-region"><div class="collapse-inner"><div class="table-wrap"><table><thead><tr><th>时间</th><th>模型 / 来源</th><th>协议</th><th>状态</th><th>耗时</th><th>说明</th></tr></thead><tbody id="logs-body"></tbody></table></div></div></div>
     </section>
   </main>
 

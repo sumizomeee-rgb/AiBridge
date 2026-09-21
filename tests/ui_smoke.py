@@ -14,7 +14,8 @@ def main() -> None:
         assert page.locator('link[rel="icon"]').get_attribute("href") == "/assets/favicon.svg"
         assert page.locator("#lan-url").is_visible()
         assert page.locator("#local-url").count() == 0
-        assert page.get_by_role("heading", name="统一模型入口").is_visible()
+        assert page.get_by_role("heading", name="模型连接", exact=True).is_visible()
+        assert page.get_by_text("统一模型入口").count() == 0
         assert page.get_by_text("一个地址，接入所有模型。").count() == 0
         assert page.locator(".source-row").count() >= 5
         assert page.locator(".source-switch").count() == page.locator(".source-row").count()
@@ -53,11 +54,11 @@ def main() -> None:
         page.locator(".source-row", has_text="Kimi Web").get_by_role("switch").click()
         page.wait_for_function(f"document.querySelector('[data-source=\"web-kimi\"] [role=\"switch\"]')?.getAttribute('aria-checked') === '{initial_enabled}'")
         page.locator("#logs-toggle").click()
-        assert not page.locator("#logs-content").is_visible()
+        assert "collapsed" in (page.locator("#logs-content").get_attribute("class") or "")
         page.reload(wait_until="networkidle")
-        assert not page.locator("#logs-content").is_visible()
+        assert "collapsed" in (page.locator("#logs-content").get_attribute("class") or "")
         page.locator("#logs-toggle").click()
-        assert page.locator("#logs-content").is_visible()
+        assert "collapsed" not in (page.locator("#logs-content").get_attribute("class") or "")
         page.screenshot(path=f"{temp_dir}/admin-smoke.png", full_page=True)
         browser.close()
     if console_errors:

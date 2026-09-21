@@ -106,7 +106,10 @@ async function load() {
 }
 
 function setLogsCollapsed(collapsed, remember = true) {
-  $("#logs-content").hidden = collapsed;
+  const content = $("#logs-content");
+  content.classList.toggle("collapsed", collapsed);
+  content.setAttribute("aria-hidden", String(collapsed));
+  content.inert = collapsed;
   const button = $("#logs-toggle");
   button.setAttribute("aria-expanded", String(!collapsed));
   button.setAttribute("aria-label", collapsed ? "展开请求记录" : "折叠请求记录");
@@ -253,7 +256,7 @@ document.addEventListener("click", async (event) => {
 
 $("#add-api").addEventListener("click", () => openSource());
 $("#refresh").addEventListener("click", () => load().then(() => toast("状态已刷新")).catch((error) => toast(error.message, true)));
-$("#logs-toggle").addEventListener("click", () => setLogsCollapsed(!$("#logs-content").hidden));
+$("#logs-toggle").addEventListener("click", () => setLogsCollapsed(!$("#logs-content").classList.contains("collapsed")));
 $("#create-key").addEventListener("click", async () => {
   try {
     const result = await api("/api/keys", { method: "POST", body: JSON.stringify({ name: $("#key-name").value.trim() || "本地 Token" }) });
