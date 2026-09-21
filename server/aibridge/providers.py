@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import re
 import shlex
@@ -10,7 +12,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, AsyncIterator
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import httpx
 
@@ -57,6 +59,7 @@ def parse_curl(text: str) -> dict[str, Any]:
     url = ""
     headers: dict[str, str] = {}
     cookie = ""
+    body = ""
     i = 0
     while i < len(tokens):
         token = tokens[i]
@@ -72,13 +75,38 @@ def parse_curl(text: str) -> dict[str, Any]:
         elif token in {"-b", "--cookie"} and i + 1 < len(tokens):
             i += 1
             cookie = tokens[i]
+        elif token in {"-d", "--data", "--data-raw", "--data-binary"} and i + 1 < len(tokens):
+            i += 1
+            body = _decode_curl_data(tokens[i])
         i += 1
     for key in list(headers):
         if key.lower() == "cookie":
             cookie = headers.pop(key)
     if not url:
         raise ProviderError("cURL 中没有找到请求 URL", "invalid_config", 400)
-    return {"request_url": url, "headers": headers, "cookie": cookie}
+    return {"request_url": url, "headers": headers, "cookie": cookie, "body": body}
+
+
+def _decode_curl_data(value: str) -> str:
+    """Decode the small ANSI-C escape subset emitted by Chrome's Copy as cURL."""
+    if not value.startswith("$"):
+        return value
+    value = value[1:]
+    escapes = {"a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v", "\\": "\\", "'": "'"}
+
+    def replace(match: re.Match[str]) -> str:
+        code = match.group(1)
+        if code in escapes:
+            return escapes[code]
+        if code.startswith("x"):
+            return chr(int(code[1:], 16))
+        if code.startswith("u") or code.startswith("U"):
+            return chr(int(code[1:], 16))
+        if code[0].isdigit():
+            return chr(int(code, 8))
+        return code
+
+    return re.sub(r"\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|[0-7]{1,3}|.)", replace, value)
 
 
 def _api_headers(source: dict[str, Any]) -> dict[str, str]:
@@ -753,6 +781,127 @@ async def _stream_perplexity(source: dict[str, Any], req: CanonicalRequest) -> A
         yield CanonicalEvent("text", text=chunk)
 
 
+def _wenxin_token(captured: str, prompt: str) -> str:
+    try:
+        encoded, lid, version = captured.rsplit("-", 2)
+        padding = "=" * (-len(encoded) % 4)
+        seed, _, _, embedded_lid = base64.b64decode(encoded + padding).decode().split("|", 3)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ProviderError("文心 cURL 中的 chat_token 格式无法识别，请重新复制最新请求", "invalid_config", 400) from exc
+    if embedded_lid != lid or version != "3":
+        raise ProviderError("文心 cURL 中的 chat_token 版本已变化", "protocol_mismatch")
+    now_ms = int(time.time() * 1000) + uuid.uuid4().int % 7
+    digest = hashlib.md5(prompt.encode()).hexdigest()
+    payload = base64.b64encode(f"{seed}|{digest}|{now_ms}|{lid}".encode()).decode()
+    return f"{payload}-{lid}-{version}"
+
+
+def _wenxin_header(fields: list[tuple[str, Any]]) -> str:
+    values: list[str] = []
+    safe_chars = "-_.!~*'()"
+    for name, value in fields:
+        if value in (None, "", False):
+            continue
+        if isinstance(value, (dict, list)):
+            value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        values.append(f"{name}:{quote(str(value), safe=safe_chars)}")
+    return ",".join(values)
+
+
+def _parse_wenxin_stream(raw: str) -> tuple[list[str], int | None, bool]:
+    chunks: list[str] = []
+    error_status: int | None = None
+    logged_in = True
+    event_name = ""
+    for line in raw.splitlines():
+        if line.startswith("event:"):
+            event_name = line[6:].strip()
+            continue
+        if event_name != "message" or not line.startswith("data:"):
+            continue
+        try:
+            event = json.loads(line[5:].strip())
+        except json.JSONDecodeError:
+            continue
+        status = event.get("status")
+        if isinstance(status, int) and status:
+            error_status = status
+        user = event.get("user") or {}
+        if user.get("isUserLogin") is False:
+            logged_in = False
+        message = (event.get("data") or {}).get("message") or {}
+        user_status = ((message.get("metaData") or {}).get("userInfo") or {}).get("status")
+        if user_status == -1:
+            logged_in = False
+        generator = ((message.get("content") or {}).get("generator") or {})
+        data = generator.get("data") or {}
+        value = data.get("value") if isinstance(data, dict) else None
+        if generator.get("component") == "markdown-yiyan" and isinstance(value, str) and value:
+            chunks.append(value)
+    return chunks, error_status, logged_in
+
+
+async def _stream_wenxin(source: dict[str, Any], req: CanonicalRequest) -> AsyncIterator[CanonicalEvent]:
+    captured_url, captured_headers = _web_headers(source)
+    captured_body = str((source.get("credential") or {}).get("body") or "")
+    if not captured_url or not captured_body:
+        raise ProviderError("文心 Web 需要包含请求正文与 Cookie 的完整对话请求 cURL；HAR 会删除 Cookie", "invalid_config", 400)
+    if not any(key.lower() == "cookie" for key in captured_headers):
+        raise ProviderError("文心 Web 的 cURL 中没有 Cookie；请使用 Network 里的 Copy as cURL (bash)，不要使用 HAR", "invalid_config", 400)
+    try:
+        body = json.loads(captured_body)
+        message = body["message"]
+        search_info = message["searchInfo"]
+        chat_params = search_info["chatParams"]
+        captured_token = str(chat_params["chat_token"])
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise ProviderError("文心 cURL 的 JSON 请求正文不完整，请重新复制 conversation 请求", "invalid_config", 400) from exc
+
+    prompt = flatten_web_prompt(req)
+    query = message.get("query")
+    if not isinstance(query, list) or not query:
+        raise ProviderError("文心请求正文缺少 query 模板", "protocol_mismatch")
+    text_data = (query[0].get("data") or {}).get("text")
+    if isinstance(text_data, dict):
+        text_data["query"] = prompt
+    elif isinstance(text_data, str):
+        query[0]["data"]["text"] = prompt
+    else:
+        raise ProviderError("文心请求正文的 query 结构已变化", "protocol_mismatch")
+
+    anti_ext = message.get("anti_ext") if isinstance(message.get("anti_ext"), dict) else {}
+    anti_ext.update({"inputT": None, "ck1": uuid.uuid4().int % 120 + 30, "ck9": uuid.uuid4().int % 640 + 120, "ck10": uuid.uuid4().int % 360 + 80})
+    message["anti_ext"] = anti_ext
+    chat_params["chat_token"] = _wenxin_token(captured_token, prompt)
+    headers = {key: value for key, value in captured_headers.items() if key.lower() not in {"x-chat-message", "content-type", "accept"}}
+    used_model = search_info.get("usedModel") or {}
+    headers.update({
+        "content-type": "application/json",
+        "accept": "text/event-stream",
+        "x-chat-message": _wenxin_header([
+            ("query", prompt[:500]),
+            ("anti_ext", anti_ext),
+            ("enter_type", search_info.get("enter_type")),
+            ("re_rank", search_info.get("re_rank")),
+            ("modelName", used_model.get("modelName")),
+            ("sa", search_info.get("sa")),
+        ]),
+    })
+    parts = urlsplit(captured_url)
+    request_url = f"{parts.scheme}://{parts.netloc}/aichat/api/conversation"
+    status, raw = await _curl_post(request_url, headers, body)
+    if status >= 400:
+        raise classify_http(status, raw)
+    chunks, event_status, logged_in = _parse_wenxin_stream(raw)
+    if not chunks:
+        if not logged_in:
+            raise ProviderError("文心登录状态已失效，请重新复制完整 cURL", "auth_expired", 401)
+        suffix = f"（status={event_status}）" if event_status is not None else ""
+        raise ProviderError(f"文心响应中没有可识别的回答{suffix}，Cookie/风控字段可能已过期", "protocol_mismatch")
+    for chunk in chunks:
+        yield CanonicalEvent("text", text=chunk)
+
+
 async def _bridge_web_tools(
     events: AsyncIterator[CanonicalEvent],
     req: CanonicalRequest,
@@ -792,6 +941,9 @@ def stream_source(source: dict[str, Any], req: CanonicalRequest) -> AsyncIterato
         dialect = "standard"
     elif protocol == "perplexity_web":
         events = _stream_perplexity(source, req)
+        dialect = "standard"
+    elif protocol == "wenxin_web":
+        events = _stream_wenxin(source, req)
         dialect = "standard"
     else:
         raise ProviderError("该 Web 来源尚未实现直连适配器", "unsupported", 400)

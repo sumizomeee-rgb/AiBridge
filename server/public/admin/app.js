@@ -43,6 +43,7 @@ const providerMarks = {
   "web-yuanbao": `<img src="/assets/providers/yuanbao.png" alt="">`,
   "web-kimi": `<img src="/assets/providers/kimi.svg" alt="">`,
   "web-perplexity": `<img src="/assets/providers/perplexity.svg" alt="">`,
+  "web-wenxin": `<img src="https://psstatic.cdn.bcebos.com/aife/image/baidu_ai_logo_1736910930000.png" alt="">`,
 };
 
 function apiProviderMark(source, fallback) {
@@ -211,7 +212,9 @@ function openSource(source = null) {
   $("#api-model-editor").hidden = isWeb;
   $("#base-label").textContent = isWeb ? "官网地址" : "上游 Base URL";
   $("#source-base").placeholder = isWeb ? "https://www.example.com" : "https://api.example.com";
-  $("#web-guide").textContent = source?.config?.guide || "";
+  const guide = source?.config?.guide || "";
+  $("#web-guide").textContent = guide;
+  $("#source-curl").placeholder = guide ? `${guide}\n\n完整粘贴到这里` : "完整粘贴 Copy as cURL (bash)";
   $("#model-help").textContent = "每行：公开名 = 上游模型名";
   $("#source-dialog").showModal();
 }

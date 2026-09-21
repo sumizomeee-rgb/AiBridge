@@ -32,6 +32,8 @@ def main() -> None:
         if page.locator('input[name="auto-routing-mode"][value="smart"]').is_checked():
             page.locator(".route-mode-options label").filter(has_text="自定义").click()
         assert page.locator('input[name="auto-routing-mode"][value="custom"]').is_checked()
+        if not page.locator('input[name="auto-dispatch-mode"][value="priority"]').is_checked():
+            page.locator(".dispatch-mode label").filter(has_text="优先来源").click()
         assert page.locator('input[name="auto-dispatch-mode"][value="priority"]').is_checked()
         page.locator(".dispatch-mode label").filter(has_text="均衡轮询").click()
         assert page.locator('input[name="auto-dispatch-mode"][value="balanced"]').is_checked()
@@ -49,6 +51,7 @@ def main() -> None:
         qwen.get_by_role("button", name="配置来源").click()
         assert "F12 → 网络 → Fetch/XHR" in page.locator("#web-guide").inner_text()
         assert "api/v2/chat/completions" in page.locator("#web-guide").inner_text()
+        assert page.locator("#source-curl").get_attribute("placeholder").startswith(page.locator("#web-guide").inner_text())
         assert page.locator("#source-base").is_visible()
         assert page.locator("#web-public-name").is_visible()
         assert page.locator("#web-max-concurrency").input_value() == "3"
@@ -69,6 +72,12 @@ def main() -> None:
         perplexity.get_by_role("button", name="配置来源").click()
         assert "过滤 perplexity_ask" in page.locator("#web-guide").inner_text()
         assert "x-pplx-account" in page.locator("#web-guide").inner_text()
+        page.locator("[data-close]").first.click()
+        wenxin = page.locator('.source-row[data-source="web-wenxin"]')
+        assert "baidu_ai_logo" in (wenxin.locator(".provider-icon img").get_attribute("src") or "")
+        wenxin.get_by_role("button", name="配置来源").click()
+        assert "过滤 /aichat/api/conversation" in page.locator("#web-guide").inner_text()
+        assert "chat_token" in page.locator("#source-curl").get_attribute("placeholder")
         page.locator("[data-close]").first.click()
         deepseek.get_by_role("button", name="配置来源").click()
         assert "deepseek-flash = deepseek-flash" in page.locator("#source-models").input_value()

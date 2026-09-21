@@ -105,11 +105,13 @@ class Storage:
             ("web-deepseek", "DeepSeek Web", "deepseek_web", "https://chat.deepseek.com", "deepseek-web", "default", True,
              "F12 → 网络 → Fetch/XHR → 过滤 api/v0/chat/completion → 发送一条新消息 → 选择 POST 请求 → 右键复制 → Copy as cURL (bash)\n必须包含 Authorization；请勿使用 HAR。"),
             ("web-yuanbao", "元宝 Web", "unsupported_web", "https://yuanbao.tencent.com", "yuanbao-web", "default", False,
-             "暂不接入。元宝网页请求依赖动态安全签名，当前不建议配置。"),
+             "此来源暂未接入，无需抓取 cURL。元宝网页请求依赖动态安全签名，当前不建议配置。"),
             ("web-kimi", "Kimi Web", "kimi_web", "https://www.kimi.com", "kimi-web", "k2d6-chat", False,
              "F12 → 网络 → Fetch/XHR → 过滤 ChatService/Chat → 发送一条新消息 → 选择 POST 请求 → 右键复制 → Copy as cURL (bash)\n必须包含 Authorization；请勿使用 HAR。"),
             ("web-perplexity", "Perplexity Web", "perplexity_web", "https://www.perplexity.ai", "perplexity-web", "turbo", False,
              "F12 → 网络 → Fetch/XHR → 过滤 perplexity_ask → 发送一条新消息 → 选择 POST 请求 → 右键复制 → Copy as cURL (bash)\n完整 cURL 应包含 x-pplx-account；登录账号请同时保留 Cookie。"),
+            ("web-wenxin", "文心 Web", "wenxin_web", "https://wenxin.baidu.com", "wenxin-web", "smartMode", False,
+             "F12 → 网络 → Fetch/XHR → 过滤 /aichat/api/conversation → 发送一条新消息 → 选择 POST 请求 → 右键复制 → Copy as cURL (bash)\n必须复制完整 cURL（HAR 会移除 Cookie）；请求正文需包含 chat_token。"),
         ]
         with self._connect() as db:
             for sid, name, protocol, base_url, public_name, upstream, enabled, guide in seeds:
@@ -231,9 +233,10 @@ class Storage:
                        WHEN id='web-doubao' THEN 3
                        WHEN id='web-kimi' THEN 4
                        WHEN id='web-perplexity' THEN 5
-                       WHEN id='web-yuanbao' THEN 6
-                       WHEN kind='web' THEN 7
-                       ELSE 8
+                       WHEN id='web-wenxin' THEN 6
+                       WHEN id='web-yuanbao' THEN 7
+                       WHEN kind='web' THEN 8
+                       ELSE 9
                    END, created_at"""
             ).fetchall()
             result = []
