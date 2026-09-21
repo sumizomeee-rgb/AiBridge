@@ -88,7 +88,7 @@ class Storage:
     def _seed_sources(self) -> None:
         seeds = [
             ("web-doubao", "豆包 Web", "doubao_web", "https://www.doubao.com", "doubao-web", "0", True,
-             "F12 → Network → Fetch/XHR，清空过滤框后发送一句测试消息。\n过滤框只输入：chat/completion\n选择名称为 completion、方法为 POST、请求 URL 以 https://www.doubao.com/chat/completion 开头的那条，并确认查询参数里同时有 a_bogus 与 msToken。右键 Copy → Copy as cURL (bash)。"),
+             "1. 先打开 F12 → Network，确认左上角录制按钮是红色。注意：已经显示在页面上的历史回复不会补录进 Network。\n2. 选择 Fetch/XHR，过滤框输入：completion\n3. 保持 Network 开着，此时再从豆包输入框发送一条全新消息。\n4. 选择名称为 completion、方法为 POST、类型为 fetch 的新请求；请求 URL 应以 https://www.doubao.com/chat/completion 开头。\n5. 确认查询参数里同时有 a_bogus 与 msToken，然后右键 Copy → Copy as cURL (bash)。\n如果发送全新消息后仍然没有结果：清空过滤框、切回“全部”，再发送一次并导出 HAR；这通常表示豆包已对当前账号切换了请求路径。"),
             ("web-qwen", "千问 Web", "qwen_web", "https://chat.qwen.ai", "qwen-web", "qwen3.7-plus", True,
              "F12 → Network → Fetch/XHR，清空过滤框后发送一句测试消息。\n过滤框只输入：api/v2/chat/completions\n选择方法为 POST、请求 URL 包含 /api/v2/chat/completions 的那条，右键 Copy → Copy as cURL (bash)。完整 cURL 会同时包含 Cookie 与 bx 风控请求头。"),
             ("web-deepseek", "DeepSeek Web", "deepseek_web", "https://chat.deepseek.com", "deepseek-web", "default", True,
