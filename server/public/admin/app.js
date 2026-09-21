@@ -67,7 +67,7 @@ function sourceCard(source) {
   const fallbackMark = `<span>${escapeHtml(initials)}</span>`;
   const providerMark = source.kind === "web" ? (providerMarks[source.id] || fallbackMark) : apiProviderMark(source, fallbackMark);
   const models = source.models.filter((x) => x.enabled).map((x) => `<span class="model-tag">${escapeHtml(x.public_name)}</span>`).join("") || `<span class="muted">暂无公开模型</span>`;
-  const type = source.kind === "web" ? "官网直连" : `${source.protocol.toUpperCase()} 兼容`;
+  const type = source.kind === "web" ? "官网直连" : (source.protocol === "anthropic" ? "Anthropic API" : "OpenAI API");
   const actions = [iconButton("health", "activity", "测试连接"), iconButton("edit", "settings", "配置来源")];
   if (source.kind === "api" && source.protocol === "openai") actions.push(iconButton("discover", "sync", "同步模型"));
   if (source.kind === "api") actions.push(iconButton("delete", "trash", "删除来源", "danger"));

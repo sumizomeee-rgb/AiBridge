@@ -8,3 +8,4 @@ nul
 .pytest_cache/
 server/data/
 *.har
+.playwright-cli/

@@ -107,6 +107,14 @@ def create_gateway_app() -> FastAPI:
         if not resolved:
             raise ProviderError(f"找不到或未启用模型：{public_model}", "model_not_found", 404)
         source, model = resolved
+        if source["kind"] == "api" and source["protocol"] != protocol:
+            expected = "/v1/messages" if source["protocol"] == "anthropic" else "/v1/chat/completions"
+            label = "Anthropic API" if source["protocol"] == "anthropic" else "OpenAI API"
+            raise ProviderError(
+                f"模型 {public_model} 来自 {label} 条目，请改用 {expected}",
+                "protocol_mismatch",
+                400,
+            )
         canonical = from_openai(body, model["upstream_name"]) if protocol == "openai" else from_anthropic(body, model["upstream_name"])
         return body, public_model, source, canonical
 

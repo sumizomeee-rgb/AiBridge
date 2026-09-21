@@ -40,4 +40,6 @@ Token 既可放在 `Authorization: Bearer ...`，也可放在 Anthropic 常用�
 
 官网 Web 接口不是稳定公开 API。健康检查会真实访问上游，并区分未配置、鉴权失效、风控拦截、协议变化和网络错误，不会用静态“绿色”掩盖失败。豆包的请求含动态签名，建议按管理台提示从 F12 复制完整 cURL；千问通常需要 Cookie 与风控请求头；DeepSeek 每次对话需要 Node.js 18+ 调用官网 WASM 完成 PoW。
 
-Web 来源会过滤 Claude Code 等 Agent 注入的大段内部系统提示和工具定义，只把实际对话送入官网聊天框。这能避免普通问候被官网内容审核误伤，但 Web 来源目前定位为文本对话兼容；需要可靠工具调用时应使用标准 API 来源。
+Web 来源会压缩 Claude Code 等 Agent 注入的大段系统提示与工具 schema，并通过网关工具桥还原 OpenAI `tool_calls` 和 Anthropic `tool_use`。桥接支持工具结果回送与 DeepSeek Web 的 DSML 调用格式，已可完成多轮本地工具任务；但官网协议随时可能变化，可靠性仍低于原生标准 API。
+
+Web 工具方言按来源隔离：DeepSeek Web 才解析 DSML，豆包与千问只解析网关标准标签。自定义 API 来源不进入 Web 工具桥，也不做跨协议伪装：OpenAI API 条目使用 `/v1/chat/completions`，Anthropic API 条目使用 `/v1/messages`。

@@ -19,7 +19,7 @@ try:
 except (ImportError, OSError):
     CurlAsyncSession = None
 
-from .protocols import CanonicalEvent, CanonicalRequest, flatten_web_prompt, to_anthropic_upstream, to_openai_upstream
+from .protocols import CanonicalEvent, CanonicalRequest, flatten_web_prompt, parse_web_tool_response, to_anthropic_upstream, to_openai_upstream, web_tool_bridge_enabled
 
 
 class ProviderError(RuntimeError):
@@ -452,6 +452,25 @@ async def _stream_deepseek(source: dict[str, Any], req: CanonicalRequest) -> Asy
         yield event
 
 
+async def _bridge_web_tools(
+    events: AsyncIterator[CanonicalEvent],
+    req: CanonicalRequest,
+    dialect: str = "standard",
+) -> AsyncIterator[CanonicalEvent]:
+    """网页端只会返回文本；缓冲答案并还原成标准工具事件。"""
+    text_parts: list[str] = []
+    async for event in events:
+        if event.type == "text":
+            text_parts.append(event.text)
+        else:
+            yield event
+    visible, tool_calls = parse_web_tool_response("".join(text_parts), req.tools, dialect)
+    if visible:
+        yield CanonicalEvent("text", text=visible)
+    for tool in tool_calls:
+        yield CanonicalEvent("tool", tool=tool)
+
+
 def stream_source(source: dict[str, Any], req: CanonicalRequest) -> AsyncIterator[CanonicalEvent]:
     protocol = source["protocol"]
     if protocol == "openai":
@@ -459,12 +478,17 @@ def stream_source(source: dict[str, Any], req: CanonicalRequest) -> AsyncIterato
     if protocol == "anthropic":
         return _stream_anthropic(source, req)
     if protocol == "qwen_web":
-        return _stream_qwen(source, req)
-    if protocol == "doubao_web":
-        return _stream_doubao(source, req)
-    if protocol == "deepseek_web":
-        return _stream_deepseek(source, req)
-    raise ProviderError("该 Web 来源尚未实现直连适配器", "unsupported", 400)
+        events = _stream_qwen(source, req)
+        dialect = "standard"
+    elif protocol == "doubao_web":
+        events = _stream_doubao(source, req)
+        dialect = "standard"
+    elif protocol == "deepseek_web":
+        events = _stream_deepseek(source, req)
+        dialect = "deepseek"
+    else:
+        raise ProviderError("该 Web 来源尚未实现直连适配器", "unsupported", 400)
+    return _bridge_web_tools(events, req, dialect) if web_tool_bridge_enabled(req) else events
 
 
 async def health_check(source: dict[str, Any], upstream_model: str) -> tuple[str, str]:
