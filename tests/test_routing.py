@@ -38,7 +38,7 @@ class FakeStorage:
             {
                 "id": "web-auto", "name": "WebAuto", "kind": "web", "protocol": "web_auto",
                 "enabled": True, "health_status": "unchecked", "has_credential": False,
-                "credential": {}, "config": {"routing_mode": "smart", "source_ids": []},
+                "credential": {}, "config": {"routing_mode": "smart", "dispatch_mode": "priority", "source_ids": []},
                 "models": [{"public_name": "web-auto", "upstream_name": "auto", "enabled": True}],
             },
             web_source("web-deepseek", "DeepSeek Web", "deepseek_web", "deepseek-web"),
@@ -48,7 +48,7 @@ class FakeStorage:
         self.health_updates: list[tuple[str, str, str]] = []
 
     def set_custom(self, source_ids: list[str]) -> None:
-        self.sources[0]["config"] = {"routing_mode": "custom", "source_ids": source_ids}
+        self.sources[0]["config"] = {"routing_mode": "custom", "dispatch_mode": "priority", "source_ids": source_ids}
 
     def list_sources(self, include_secret: bool = False) -> list[dict]:
         sources = copy.deepcopy(self.sources)
@@ -92,6 +92,17 @@ class SourceSchedulerTests(unittest.IsolatedAsyncioTestCase):
         for item in deepseek:
             await item.release()
 
+    async def test_balanced_dispatch_rotates_even_after_each_request_finishes(self) -> None:
+        scheduler = SourceScheduler()
+        candidates = [("web-deepseek", 3), ("web-qwen", 3), ("web-doubao", 3)]
+        selected: list[str] = []
+        for _ in range(6):
+            lease = await scheduler.acquire_balanced(candidates)
+            selected.append(lease.source_id)
+            await lease.release()
+
+        self.assertEqual(selected, ["web-deepseek", "web-qwen", "web-doubao", "web-deepseek", "web-qwen", "web-doubao"])
+
 
 class WebRouterTests(unittest.IsolatedAsyncioTestCase):
     async def test_auto_falls_back_before_first_content(self) -> None:
@@ -113,6 +124,23 @@ class WebRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("DeepSeek Web：临时协议异常", context.note)
         self.assertEqual(storage.health_updates, [("web-deepseek", "protocol_mismatch", "临时协议异常")])
         self.assertEqual(router.scheduler.snapshot()["active"], {})
+
+    async def test_auto_balanced_dispatch_rotates_real_routes(self) -> None:
+        storage = FakeStorage()
+        storage.sources[0]["config"]["dispatch_mode"] = "balanced"
+        selected: list[str] = []
+
+        async def fake_stream(source: dict, request: CanonicalRequest):
+            selected.append(source["id"])
+            yield CanonicalEvent("text", text=source["id"])
+
+        router = WebRouter(storage, SourceScheduler(), fake_stream, keepalive_seconds=0.01)
+        auto = storage.sources[0]
+        request = CanonicalRequest(model="web-auto", upstream_model="auto", messages=[])
+        for _ in range(4):
+            await collect_events(router.stream(auto, request, RouteContext(auto)))
+
+        self.assertEqual(selected, ["web-deepseek", "web-qwen", "web-doubao", "web-deepseek"])
 
     async def test_direct_web_failure_updates_source_health_immediately(self) -> None:
         storage = FakeStorage()
@@ -174,17 +202,21 @@ class StorageSeedTests(unittest.TestCase):
             storage = Storage(root / "aibridge.db", root / "secret.key")
             sources = storage.list_sources()
             self.assertEqual(
-                [source["id"] for source in sources[:6]],
-                ["web-auto", "web-deepseek", "web-qwen", "web-doubao", "web-yuanbao", "web-kimi"],
+                [source["id"] for source in sources[:7]],
+                ["web-auto", "web-deepseek", "web-qwen", "web-doubao", "web-kimi", "web-perplexity", "web-yuanbao"],
             )
             auto = sources[0]
             self.assertEqual(auto["models"][0]["public_name"], "web-auto")
             self.assertEqual(auto["config"]["routing_mode"], "smart")
+            self.assertEqual(auto["config"]["dispatch_mode"], "priority")
             self.assertEqual(auto["config"]["source_ids"], [])
             kimi = next(source for source in sources if source["id"] == "web-kimi")
             self.assertEqual(kimi["protocol"], "kimi_web")
             self.assertEqual(kimi["models"][0]["upstream_name"], "k2d6-chat")
-            for source in sources[1:6]:
+            perplexity = next(source for source in sources if source["id"] == "web-perplexity")
+            self.assertEqual(perplexity["protocol"], "perplexity_web")
+            self.assertEqual(perplexity["models"][0]["upstream_name"], "turbo")
+            for source in sources[1:7]:
                 self.assertEqual(source["config"]["max_concurrency"], 3)
 
 

@@ -42,6 +42,7 @@ const providerMarks = {
   "web-doubao": `<img src="/assets/providers/doubao.png" alt="">`,
   "web-yuanbao": `<img src="/assets/providers/yuanbao.png" alt="">`,
   "web-kimi": `<img src="/assets/providers/kimi.svg" alt="">`,
+  "web-perplexity": `<img src="/assets/providers/perplexity.svg" alt="">`,
 };
 
 function apiProviderMark(source, fallback) {
@@ -71,7 +72,7 @@ function sourceCard(source) {
   const isAuto = source.id === "web-auto";
   const type = isAuto ? "自动路由" : (source.kind === "web" ? "官网直连" : (source.protocol === "anthropic" ? "Anthropic API" : "OpenAI API"));
   const endpoint = isAuto
-    ? (source.config?.routing_mode === "custom" ? `自定义 · ${(source.config?.source_ids || []).length} 个来源` : "智能 · DeepSeek → 千问 → 豆包")
+    ? `${source.config?.routing_mode === "custom" ? `自定义 ${(source.config?.source_ids || []).length} 个来源` : "智能来源"} · ${source.config?.dispatch_mode === "balanced" ? "均衡轮询" : "优先来源"}`
     : source.base_url;
   const runtime = source.runtime || {};
   const capacity = source.kind === "web"
@@ -137,6 +138,10 @@ function autoMode() {
   return document.querySelector('input[name="auto-routing-mode"]:checked')?.value || "smart";
 }
 
+function autoDispatchMode() {
+  return document.querySelector('input[name="auto-dispatch-mode"]:checked')?.value || "priority";
+}
+
 function selectedAutoSourceIds() {
   return [...document.querySelectorAll("[data-auto-source]:checked")].map((input) => input.dataset.autoSource);
 }
@@ -188,6 +193,9 @@ function openSource(source = null) {
   const routingMode = source?.config?.routing_mode === "custom" ? "custom" : "smart";
   const modeInput = document.querySelector(`input[name="auto-routing-mode"][value="${routingMode}"]`);
   if (modeInput) modeInput.checked = true;
+  const dispatchMode = source?.config?.dispatch_mode === "balanced" ? "balanced" : "priority";
+  const dispatchInput = document.querySelector(`input[name="auto-dispatch-mode"][value="${dispatchMode}"]`);
+  if (dispatchInput) dispatchInput.checked = true;
   renderAutoSourcePicker(source?.config?.source_ids || []);
   syncAutoRoutingFields();
   $("#web-fields").hidden = !isWeb;
@@ -229,6 +237,7 @@ $("#source-form").addEventListener("submit", async (event) => {
     if (!publicName) return toast("请填写对外模型名", true);
     const isAuto = old.id === "web-auto";
     const routingMode = autoMode();
+    const dispatchMode = autoDispatchMode();
     const sourceIds = selectedAutoSourceIds();
     if (isAuto && routingMode === "custom" && !sourceIds.length) return toast("自定义路由至少选择一个来源", true);
     const maxConcurrency = Math.max(1, Math.min(32, Number.parseInt($("#web-max-concurrency").value, 10) || 3));
@@ -237,7 +246,7 @@ $("#source-form").addEventListener("submit", async (event) => {
       enabled: old.enabled,
       protocol: old.protocol,
       base_url: isAuto ? "" : $("#source-base").value.trim(),
-      config: isAuto ? { ...old.config, routing_mode: routingMode, source_ids: sourceIds } : { ...old.config, max_concurrency: maxConcurrency },
+      config: isAuto ? { ...old.config, routing_mode: routingMode, dispatch_mode: dispatchMode, source_ids: sourceIds } : { ...old.config, max_concurrency: maxConcurrency },
       model: { id: previous?.id, public_name: publicName, upstream_name: previous?.upstream_name || (isAuto ? "auto" : "default"), enabled: true },
     });
     if (!isAuto) {

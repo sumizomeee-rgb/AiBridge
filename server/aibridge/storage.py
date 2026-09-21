@@ -97,7 +97,7 @@ class Storage:
     def _seed_sources(self) -> None:
         seeds = [
             ("web-auto", "WebAuto", "web_auto", "", "web-auto", "auto", True,
-             "智能模式按 DeepSeek Web → 千问 Web → 豆包 Web → 其他来源自动选择；自定义模式只使用你指定的来源。它不需要单独填写浏览器凭据。"),
+             "智能来源只使用已启用且健康的条目；自定义来源严格使用你的名单。调度可选择优先来源或均衡轮询。"),
             ("web-doubao", "豆包 Web", "doubao_web", "https://www.doubao.com", "doubao-web", "0", True,
              "F12 → 网络 → Fetch/XHR → 过滤 completion → 发送一条新消息 → 选择 POST completion → 右键复制 → Copy as cURL (bash)\n请求地址必须包含 a_bogus 与 msToken；找不到时清空过滤后再发一次。"),
             ("web-qwen", "千问 Web", "qwen_web", "https://chat.qwen.ai", "qwen-web", "qwen3.7-plus", True,
@@ -108,6 +108,8 @@ class Storage:
              "暂不接入。元宝网页请求依赖动态安全签名，当前不建议配置。"),
             ("web-kimi", "Kimi Web", "kimi_web", "https://www.kimi.com", "kimi-web", "k2d6-chat", False,
              "F12 → 网络 → Fetch/XHR → 过滤 ChatService/Chat → 发送一条新消息 → 选择 POST 请求 → 右键复制 → Copy as cURL (bash)\n必须包含 Authorization；请勿使用 HAR。"),
+            ("web-perplexity", "Perplexity Web", "perplexity_web", "https://www.perplexity.ai", "perplexity-web", "turbo", False,
+             "F12 → 网络 → Fetch/XHR → 过滤 perplexity_ask → 发送一条新消息 → 选择 POST 请求 → 右键复制 → Copy as cURL (bash)\n完整 cURL 应包含 x-pplx-account；登录账号请同时保留 Cookie。"),
         ]
         with self._connect() as db:
             for sid, name, protocol, base_url, public_name, upstream, enabled, guide in seeds:
@@ -128,6 +130,9 @@ class Storage:
                 if protocol == "web_auto" and config.get("routing_mode") not in {"smart", "custom"}:
                     config["routing_mode"] = "smart"
                     config["source_ids"] = []
+                    changed = True
+                if protocol == "web_auto" and config.get("dispatch_mode") not in {"priority", "balanced"}:
+                    config["dispatch_mode"] = "priority"
                     changed = True
                 if changed:
                     db.execute("UPDATE sources SET config_json=?,updated_at=? WHERE id=?", (json.dumps(config, ensure_ascii=False), stamp, sid))
@@ -224,10 +229,11 @@ class Storage:
                        WHEN id='web-deepseek' THEN 1
                        WHEN id='web-qwen' THEN 2
                        WHEN id='web-doubao' THEN 3
-                       WHEN id='web-yuanbao' THEN 4
-                       WHEN id='web-kimi' THEN 5
-                       WHEN kind='web' THEN 6
-                       ELSE 7
+                       WHEN id='web-kimi' THEN 4
+                       WHEN id='web-perplexity' THEN 5
+                       WHEN id='web-yuanbao' THEN 6
+                       WHEN kind='web' THEN 7
+                       ELSE 8
                    END, created_at"""
             ).fetchall()
             result = []
@@ -271,6 +277,7 @@ class Storage:
                 config["max_concurrency"] = max(1, min(32, max_concurrency))
             if data.get("protocol") == "web_auto":
                 config["routing_mode"] = "custom" if config.get("routing_mode") == "custom" else "smart"
+                config["dispatch_mode"] = "balanced" if config.get("dispatch_mode") == "balanced" else "priority"
                 source_ids = config.get("source_ids") if isinstance(config.get("source_ids"), list) else []
                 config["source_ids"] = list(dict.fromkeys(
                     source_id for source_id in source_ids

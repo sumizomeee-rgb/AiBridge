@@ -69,6 +69,13 @@
               <label><input type="radio" name="auto-routing-mode" value="custom"><span><strong>自定义</strong><small>严格按你的名单调度，不检查状态、不做失败兜底</small></span></label>
             </div>
           </fieldset>
+          <fieldset class="route-mode dispatch-mode">
+            <legend>调度方式</legend>
+            <div class="route-mode-options">
+              <label><input type="radio" name="auto-dispatch-mode" value="priority" checked><span><strong>优先来源</strong><small>持续使用首选来源，满并发后再使用下一个</small></span></label>
+              <label><input type="radio" name="auto-dispatch-mode" value="balanced"><span><strong>均衡轮询</strong><small>新请求依次分给可用来源，雨露均沾</small></span></label>
+            </div>
+          </fieldset>
           <div id="auto-custom-routing" hidden>
             <div class="route-picker-head"><div><strong>参与路由的来源</strong><small>可选择未启用或不健康的来源；箭头用于调整优先级。</small></div><span id="auto-source-count">0 个</span></div>
             <div id="auto-source-picker" class="route-picker"></div>

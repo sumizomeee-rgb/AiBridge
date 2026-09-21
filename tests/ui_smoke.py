@@ -18,9 +18,9 @@ def main() -> None:
         assert page.get_by_role("heading", name="模型连接", exact=True).is_visible()
         assert page.get_by_text("统一模型入口").count() == 0
         assert page.get_by_text("一个地址，接入所有模型。").count() == 0
-        assert page.locator(".source-row").count() >= 6
+        assert page.locator(".source-row").count() >= 7
         assert page.locator(".source-switch").count() == page.locator(".source-row").count()
-        assert page.locator(".source-row .provider-icon img").count() >= 5
+        assert page.locator(".source-row .provider-icon img").count() >= 6
         assert page.locator(".source-row").first.get_attribute("data-source") == "web-auto"
         auto = page.locator('.source-row[data-source="web-auto"]')
         assert "池" in auto.locator(".capacity").inner_text()
@@ -32,8 +32,11 @@ def main() -> None:
         if page.locator('input[name="auto-routing-mode"][value="smart"]').is_checked():
             page.locator(".route-mode-options label").filter(has_text="自定义").click()
         assert page.locator('input[name="auto-routing-mode"][value="custom"]').is_checked()
+        assert page.locator('input[name="auto-dispatch-mode"][value="priority"]').is_checked()
+        page.locator(".dispatch-mode label").filter(has_text="均衡轮询").click()
+        assert page.locator('input[name="auto-dispatch-mode"][value="balanced"]').is_checked()
         assert page.locator("#auto-custom-routing").is_visible()
-        assert page.locator("[data-auto-source]").count() >= 5
+        assert page.locator("[data-auto-source]").count() >= 6
         assert page.locator('[data-auto-source="web-kimi"]').is_enabled()
         kimi_route = page.locator('[data-auto-source="web-kimi"]')
         if not kimi_route.is_checked():
@@ -60,6 +63,12 @@ def main() -> None:
         kimi.get_by_role("button", name="配置来源").click()
         assert "ChatService/Chat" in page.locator("#web-guide").inner_text()
         assert "必须包含 Authorization" in page.locator("#web-guide").inner_text()
+        page.locator("[data-close]").first.click()
+        perplexity = page.locator('.source-row[data-source="web-perplexity"]')
+        assert perplexity.locator('img[src="/assets/providers/perplexity.svg"]').count() == 1
+        perplexity.get_by_role("button", name="配置来源").click()
+        assert "过滤 perplexity_ask" in page.locator("#web-guide").inner_text()
+        assert "x-pplx-account" in page.locator("#web-guide").inner_text()
         page.locator("[data-close]").first.click()
         deepseek.get_by_role("button", name="配置来源").click()
         assert "deepseek-flash = deepseek-flash" in page.locator("#source-models").input_value()

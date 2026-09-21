@@ -14,8 +14,10 @@ AUTO_SOURCE_ID = "web-auto"
 AUTO_SOURCE_PROTOCOL = "web_auto"
 AUTO_MODE_SMART = "smart"
 AUTO_MODE_CUSTOM = "custom"
-WEB_SOURCE_PRIORITY = ("web-deepseek", "web-qwen", "web-doubao", "web-yuanbao", "web-kimi")
-SUPPORTED_WEB_PROTOCOLS = {"deepseek_web", "qwen_web", "doubao_web", "kimi_web"}
+AUTO_DISPATCH_PRIORITY = "priority"
+AUTO_DISPATCH_BALANCED = "balanced"
+WEB_SOURCE_PRIORITY = ("web-deepseek", "web-qwen", "web-doubao", "web-kimi", "web-perplexity", "web-yuanbao")
+SUPPORTED_WEB_PROTOCOLS = {"deepseek_web", "qwen_web", "doubao_web", "kimi_web", "perplexity_web"}
 AUTO_ELIGIBLE_HEALTH = {"healthy", "unchecked"}
 DEFAULT_WEB_CONCURRENCY = 3
 MAX_WEB_CONCURRENCY = 32
@@ -51,6 +53,7 @@ class SourceScheduler:
         self._active: dict[str, int] = {}
         self._waiting: dict[str, int] = {}
         self._auto_waiting = 0
+        self._balanced_cursor = 0
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -84,6 +87,25 @@ class SourceScheduler:
                     for source_id, limit in candidates:
                         if self._active.get(source_id, 0) < limit:
                             self._active[source_id] = self._active.get(source_id, 0) + 1
+                            return SourceLease(self, source_id)
+                    await self._condition.wait()
+            finally:
+                self._auto_waiting -= 1
+
+    async def acquire_balanced(self, candidates: list[tuple[str, int]]) -> SourceLease:
+        if not candidates:
+            raise ProviderError("WebAuto 当前没有可用的 Web 来源", "no_available_source", 503)
+        async with self._condition:
+            self._auto_waiting += 1
+            try:
+                while True:
+                    start = self._balanced_cursor % len(candidates)
+                    for offset in range(len(candidates)):
+                        index = (start + offset) % len(candidates)
+                        source_id, limit = candidates[index]
+                        if self._active.get(source_id, 0) < limit:
+                            self._active[source_id] = self._active.get(source_id, 0) + 1
+                            self._balanced_cursor = (index + 1) % len(candidates)
                             return SourceLease(self, source_id)
                     await self._condition.wait()
             finally:
@@ -147,23 +169,25 @@ class WebRouter:
         self.storage.update_health(source["id"], status, message)
 
     @staticmethod
-    def _routing_policy(sources: dict[str, dict[str, Any]]) -> tuple[str, list[str]]:
+    def _routing_policy(sources: dict[str, dict[str, Any]]) -> tuple[str, list[str], str]:
         config = (sources.get(AUTO_SOURCE_ID) or {}).get("config") or {}
         mode = AUTO_MODE_CUSTOM if config.get("routing_mode") == AUTO_MODE_CUSTOM else AUTO_MODE_SMART
+        dispatch = AUTO_DISPATCH_BALANCED if config.get("dispatch_mode") == AUTO_DISPATCH_BALANCED else AUTO_DISPATCH_PRIORITY
         source_ids = config.get("source_ids") if isinstance(config.get("source_ids"), list) else []
         selected = list(dict.fromkeys(
             source_id for source_id in source_ids
             if isinstance(source_id, str) and source_id != AUTO_SOURCE_ID
         ))
-        return mode, selected
+        return mode, selected, dispatch
 
-    def routing_mode(self) -> str:
+    def routing_settings(self) -> tuple[str, str]:
         sources = {item["id"]: item for item in self.storage.list_sources()}
-        return self._routing_policy(sources)[0]
+        mode, _, dispatch = self._routing_policy(sources)
+        return mode, dispatch
 
     def configured_candidates(self, *, require_healthy: bool = True) -> list[dict[str, Any]]:
         sources = {item["id"]: item for item in self.storage.list_sources(include_secret=True)}
-        mode, selected_ids = self._routing_policy(sources)
+        mode, selected_ids, _ = self._routing_policy(sources)
         result: list[dict[str, Any]] = []
         source_ids = selected_ids if mode == AUTO_MODE_CUSTOM else WEB_SOURCE_PRIORITY
         for source_id in source_ids:
@@ -191,7 +215,7 @@ class WebRouter:
         active = snapshot["active"]
         waiting = snapshot["waiting"]
         public_by_id = {source["id"]: source for source in sources}
-        mode, selected_ids = self._routing_policy(public_by_id)
+        mode, selected_ids, dispatch = self._routing_policy(public_by_id)
         candidates: list[dict[str, Any]] = []
         source_ids = selected_ids if mode == AUTO_MODE_CUSTOM else WEB_SOURCE_PRIORITY
         for source_id in source_ids:
@@ -226,12 +250,13 @@ class WebRouter:
                 "sources": len(candidates),
             }
             if preferred:
+                dispatch_label = "均衡轮询" if dispatch == AUTO_DISPATCH_BALANCED else "优先来源"
                 if mode == AUTO_MODE_CUSTOM:
                     auto["health_status"] = preferred.get("health_status") or "unchecked"
-                    auto["health_message"] = f"自定义 · 首选 {preferred['name']} · {len(candidates)} 个来源（不按健康状态切换）"
+                    auto["health_message"] = f"自定义 · {dispatch_label} · {len(candidates)} 个来源（不按健康状态切换）"
                 else:
                     auto["health_status"] = "healthy" if preferred.get("health_status") == "healthy" else "unchecked"
-                    auto["health_message"] = f"智能 · 当前首选 {preferred['name']} · {len(candidates)} 个来源可参与路由"
+                    auto["health_message"] = f"智能 · {dispatch_label} · {len(candidates)} 个来源可参与路由"
                 auto["last_checked_at"] = preferred.get("last_checked_at")
             else:
                 auto["health_status"] = "unconfigured"
@@ -296,7 +321,8 @@ class WebRouter:
                 await lease.release()
             return
 
-        custom_mode = self.routing_mode() == AUTO_MODE_CUSTOM
+        routing_mode, dispatch_mode = self.routing_settings()
+        custom_mode = routing_mode == AUTO_MODE_CUSTOM
         excluded: set[str] = set()
         while True:
             candidates = [item for item in self.configured_candidates() if item["id"] not in excluded]
@@ -307,7 +333,9 @@ class WebRouter:
                     message += f"：{detail}"
                 raise ProviderError(message, "no_available_source", 503)
 
-            task = asyncio.create_task(self.scheduler.acquire_first([(item["id"], source_concurrency(item)) for item in candidates]))
+            candidate_limits = [(item["id"], source_concurrency(item)) for item in candidates]
+            acquire = self.scheduler.acquire_balanced(candidate_limits) if dispatch_mode == AUTO_DISPATCH_BALANCED else self.scheduler.acquire_first(candidate_limits)
+            task = asyncio.create_task(acquire)
             async for heartbeat in self._acquire_with_heartbeats(task, context):
                 yield heartbeat
             lease = context.lease

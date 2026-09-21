@@ -251,6 +251,85 @@ def _kimi_delta(message: dict[str, Any]) -> CanonicalEvent | None:
     return CanonicalEvent("reasoning", reasoning=content) if "think" in mask else CanonicalEvent("text", text=content)
 
 
+def _perplexity_step_chunks(value: Any) -> tuple[list[str], str]:
+    chunks: list[str] = []
+    fallback = ""
+    if isinstance(value, dict):
+        payload = value.get("text_payload")
+        if isinstance(payload, dict):
+            raw_chunks = payload.get("chunks")
+            if isinstance(raw_chunks, list):
+                chunks.extend(item for item in raw_chunks if isinstance(item, str) and item)
+            if isinstance(payload.get("text"), str) and payload["text"]:
+                fallback = payload["text"]
+        for nested in value.values():
+            nested_chunks, nested_fallback = _perplexity_step_chunks(nested)
+            chunks.extend(nested_chunks)
+            fallback = nested_fallback or fallback
+    elif isinstance(value, list):
+        for nested in value:
+            nested_chunks, nested_fallback = _perplexity_step_chunks(nested)
+            chunks.extend(nested_chunks)
+            fallback = nested_fallback or fallback
+    return chunks, fallback
+
+
+def _parse_perplexity_stream(raw: str) -> list[str]:
+    chunks: list[str] = []
+    markdown_chunks: dict[int, str] = {}
+    fallback = ""
+    for line in raw.splitlines():
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            event = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        for block in event.get("blocks") or []:
+            if not isinstance(block, dict):
+                continue
+            markdown = block.get("markdown_block")
+            if isinstance(markdown, dict):
+                try:
+                    start = int(markdown.get("chunk_starting_offset", len(markdown_chunks)))
+                except (TypeError, ValueError):
+                    start = len(markdown_chunks)
+                for index, chunk in enumerate(markdown.get("chunks") or []):
+                    if isinstance(chunk, str) and chunk:
+                        markdown_chunks[start + index] = chunk
+                if isinstance(markdown.get("answer"), str) and markdown["answer"]:
+                    fallback = markdown["answer"]
+            diff = block.get("diff_block")
+            if isinstance(diff, dict) and diff.get("field") == "workflow_block":
+                for patch in diff.get("patches") or []:
+                    if not isinstance(patch, dict):
+                        continue
+                    path = str(patch.get("path") or "")
+                    value = patch.get("value")
+                    if "/text_payload/chunks/" in path and isinstance(value, str) and value:
+                        chunks.append(value)
+                    elif path.endswith("/text_payload/text") and isinstance(value, str) and value:
+                        fallback = value
+                    elif patch.get("op") == "add" and isinstance(value, (dict, list)):
+                        initial_chunks, initial_fallback = _perplexity_step_chunks(value)
+                        chunks.extend(initial_chunks)
+                        fallback = initial_fallback or fallback
+            workflow = block.get("workflow_block")
+            if isinstance(workflow, dict):
+                _, full_text = _perplexity_step_chunks(workflow)
+                fallback = full_text or fallback
+    if chunks:
+        return chunks
+    if markdown_chunks:
+        return [markdown_chunks[index] for index in sorted(markdown_chunks)]
+    return [fallback] if fallback else []
+
+
 async def _curl_get(url: str, headers: dict[str, str]) -> tuple[int, str]:
     if CurlAsyncSession is not None:
         session = CurlAsyncSession(impersonate="chrome", timeout=30)
@@ -611,6 +690,69 @@ async def _stream_kimi(source: dict[str, Any], req: CanonicalRequest) -> AsyncIt
         raise ProviderError("Kimi 响应中没有可识别的回答", "protocol_mismatch")
 
 
+async def _stream_perplexity(source: dict[str, Any], req: CanonicalRequest) -> AsyncIterator[CanonicalEvent]:
+    captured_url, captured_headers = _web_headers(source)
+    has_account = any(key.lower() == "x-pplx-account" for key in captured_headers)
+    if not captured_url or not has_account:
+        raise ProviderError("Perplexity Web 需要包含 x-pplx-account 的完整对话请求 cURL", "invalid_config", 400)
+
+    parts = urlsplit(captured_url)
+    origin = f"{parts.scheme}://{parts.netloc}"
+    request_url = f"{origin}/rest/sse/perplexity_ask"
+    replaced_headers = {"content-type", "accept", "x-request-id"}
+    headers = {key: value for key, value in captured_headers.items() if key.lower() not in replaced_headers}
+    headers.update({
+        "content-type": "application/json",
+        "accept": "text/event-stream",
+        "origin": origin,
+        "referer": f"{origin}/",
+        "x-request-id": str(uuid.uuid4()),
+    })
+    frontend_id = str(uuid.uuid4())
+    context_id = str(uuid.uuid4())
+    prompt = flatten_web_prompt(req)
+    body = {
+        "params": {
+            "attachments": [],
+            "language": "zh-CN",
+            "timezone": "Asia/Shanghai",
+            "search_focus": "internet",
+            "sources": ["web"],
+            "frontend_uuid": frontend_id,
+            "mode": "copilot",
+            "model_preference": req.upstream_model or "turbo",
+            "is_related_query": False,
+            "frontend_context_uuid": context_id,
+            "prompt_source": "user",
+            "query_source": "home",
+            "is_incognito": False,
+            "use_schematized_api": True,
+            "send_back_text_in_streaming_api": False,
+            "dsl_query": prompt,
+            "skip_search_enabled": True,
+            "source": "default",
+            "always_search_override": False,
+            "override_no_search": False,
+            "client_search_results_cache_key": frontend_id,
+            "rum_session_id": str(uuid.uuid4()),
+        },
+        "query_str": prompt,
+    }
+    status, raw = await _curl_post(request_url, headers, body)
+    if status >= 400:
+        raise classify_http(status, raw)
+    chunks = _parse_perplexity_stream(raw)
+    if not chunks:
+        raise ProviderError("Perplexity 响应中没有可识别的回答", "protocol_mismatch")
+    full_text = "".join(chunks)
+    if re.search(r"sign up.+repeat your request", full_text, re.IGNORECASE | re.DOTALL):
+        raise ProviderError("Perplexity 要求登录，请重新复制登录状态下的完整 cURL", "auth_expired", 401)
+    if re.search(r"wait.+repeat your request", full_text, re.IGNORECASE | re.DOTALL):
+        raise ProviderError("Perplexity 暂时限流，请稍后重试", "rate_limited", 429)
+    for chunk in chunks:
+        yield CanonicalEvent("text", text=chunk)
+
+
 async def _bridge_web_tools(
     events: AsyncIterator[CanonicalEvent],
     req: CanonicalRequest,
@@ -647,6 +789,9 @@ def stream_source(source: dict[str, Any], req: CanonicalRequest) -> AsyncIterato
         dialect = "deepseek"
     elif protocol == "kimi_web":
         events = _stream_kimi(source, req)
+        dialect = "standard"
+    elif protocol == "perplexity_web":
+        events = _stream_perplexity(source, req)
         dialect = "standard"
     else:
         raise ProviderError("该 Web 来源尚未实现直连适配器", "unsupported", 400)

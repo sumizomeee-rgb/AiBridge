@@ -184,6 +184,8 @@ label.wide { grid-column: 1 / -1; }
 .route-mode-options input:focus-visible + span { outline: 2px solid rgba(53, 111, 82, .38); outline-offset: 2px; }
 .route-mode-options strong { color: var(--ink); font-size: 13px; }
 .route-mode-options small { color: var(--faint); font-size: 10px; line-height: 1.35; }
+.dispatch-mode { padding-top: 13px; border-top: 1px solid var(--line); }
+.dispatch-mode legend { padding-top: 13px; }
 #auto-custom-routing { display: grid; gap: 8px; }
 .route-picker-head { display: flex; align-items: end; justify-content: space-between; gap: 16px; }
 .route-picker-head strong, .route-picker-head small { display: block; }
