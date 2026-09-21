@@ -22,12 +22,15 @@ from .protocols import (
     openai_sse,
     sse,
 )
-from .providers import ProviderError, _api_headers, endpoint, health_check, parse_curl, stream_source
+from .providers import ProviderError, _api_headers, endpoint, health_check, parse_curl
+from .routing import AUTO_SOURCE_ID, RouteContext, SourceScheduler, WebRouter, source_concurrency
 from .settings import STATIC_DIR, settings
 from .storage import Storage
 
 
 storage = Storage(settings.database_path, settings.secret_key_path)
+source_scheduler = SourceScheduler()
+web_router = WebRouter(storage, source_scheduler)
 
 
 def _lan_ip() -> str:
@@ -122,18 +125,24 @@ def create_gateway_app() -> FastAPI:
         started = time.perf_counter()
         request_id = ("chatcmpl-" if protocol == "openai" else "msg_") + uuid.uuid4().hex
         source: dict[str, Any] | None = None
+        route: RouteContext | None = None
         public_model = ""
         try:
             _, public_model, source, canonical = await _prepare(request, protocol)
-            text, usage, tools = await collect_events(stream_source(source, canonical))
-            storage.update_health(source["id"], "healthy", "最近一次网关请求成功")
-            storage.add_log(request_id, source["name"], public_model, protocol, "ok", int((time.perf_counter() - started) * 1000))
+            route = RouteContext(source)
+            text, usage, tools = await collect_events(web_router.stream(source, canonical, route))
+            actual = route.actual_source or source
+            if actual.get("kind") == "web":
+                storage.update_health(actual["id"], "healthy", "最近一次网关请求成功")
+            storage.add_log(request_id, route.source_label, public_model, protocol, "ok", int((time.perf_counter() - started) * 1000), route.note)
             return openai_response(request_id, public_model, text, usage, tools) if protocol == "openai" else anthropic_response(request_id, public_model, text, usage, tools)
         except ProviderError as exc:
-            storage.add_log(request_id, source["name"] if source else "-", public_model, protocol, "error", int((time.perf_counter() - started) * 1000), str(exc))
+            note = " · ".join(item for item in (route.note if route else None, str(exc)) if item)
+            storage.add_log(request_id, route.source_label if route else (source["name"] if source else "-"), public_model, protocol, "error", int((time.perf_counter() - started) * 1000), note)
             return _openai_error(str(exc), exc.http_status, exc.status) if protocol == "openai" else _anthropic_error(str(exc), exc.http_status, exc.status)
         except Exception as exc:
-            storage.add_log(request_id, source["name"] if source else "-", public_model, protocol, "error", int((time.perf_counter() - started) * 1000), str(exc))
+            note = " · ".join(item for item in (route.note if route else None, str(exc)) if item)
+            storage.add_log(request_id, route.source_label if route else (source["name"] if source else "-"), public_model, protocol, "error", int((time.perf_counter() - started) * 1000), note)
             return _openai_error(f"网关内部错误：{type(exc).__name__}", 500, "internal_error") if protocol == "openai" else _anthropic_error(f"网关内部错误：{type(exc).__name__}", 500, "api_error")
 
     async def _stream(request: Request, protocol: str):
@@ -147,8 +156,10 @@ def create_gateway_app() -> FastAPI:
         async def output() -> AsyncIterator[bytes]:
             status = "ok"
             error = None
+            route = RouteContext(source)
             try:
-                translated = openai_sse(stream_source(source, canonical), request_id, public_model) if protocol == "openai" else anthropic_sse(stream_source(source, canonical), request_id, public_model)
+                events = web_router.stream(source, canonical, route)
+                translated = openai_sse(events, request_id, public_model) if protocol == "openai" else anthropic_sse(events, request_id, public_model)
                 async for chunk in translated:
                     yield chunk
             except Exception as exc:
@@ -160,8 +171,11 @@ def create_gateway_app() -> FastAPI:
                     yield sse({"type": "error", "error": {"type": getattr(exc, "status", "api_error"), "message": str(exc)}}, "error")
             finally:
                 if status == "ok":
-                    storage.update_health(source["id"], "healthy", "最近一次网关请求成功")
-                storage.add_log(request_id, source["name"], public_model, protocol, status, int((time.perf_counter() - started) * 1000), error)
+                    actual = route.actual_source or source
+                    if actual.get("kind") == "web":
+                        storage.update_health(actual["id"], "healthy", "最近一次网关请求成功")
+                detail = " · ".join(item for item in (route.note, error) if item)
+                storage.add_log(request_id, route.source_label, public_model, protocol, status, int((time.perf_counter() - started) * 1000), detail)
 
         return StreamingResponse(output(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -199,10 +213,11 @@ def create_admin_app() -> FastAPI:
     @app.get("/api/state")
     async def state(request: Request):
         lan = _lan_ip()
+        sources = web_router.runtime_sources(storage.list_sources())
         return {
             "gateway": {"local_url": f"http://127.0.0.1:{settings.gateway_port}", "lan_url": f"http://{lan}:{settings.gateway_port}", "admin_url": f"http://127.0.0.1:{settings.admin_port}"},
             "permissions": {"source_toggle": _loopback_client(request.client.host if request.client else None)},
-            "sources": storage.list_sources(), "keys": storage.list_keys(), "logs": storage.list_logs(),
+            "sources": sources, "keys": storage.list_keys(), "logs": storage.list_logs(),
         }
 
     @app.post("/api/keys")
@@ -283,9 +298,32 @@ def create_admin_app() -> FastAPI:
         source = storage.get_source(source_id, include_secret=True)
         if not source:
             raise HTTPException(404, "来源不存在")
+        if source_id == AUTO_SOURCE_ID:
+            candidates = web_router.configured_candidates(require_healthy=False)
+            if not candidates:
+                return {"status": "unconfigured", "message": "没有已启用且已配置的 Web 来源"}
+            failures: list[str] = []
+            for candidate in candidates:
+                lease = await source_scheduler.acquire(candidate["id"], source_concurrency(candidate))
+                try:
+                    status, message = await health_check(candidate, candidate["route_model"]["upstream_name"])
+                finally:
+                    await lease.release()
+                storage.update_health(candidate["id"], status, message)
+                if status == "healthy":
+                    return {"status": "healthy", "message": f"当前首选 {candidate['name']}：{message}"}
+                failures.append(f"{candidate['name']}：{message}")
+            return {"status": "upstream_error", "message": "；".join(failures)[:500]}
         models = next((x["models"] for x in storage.list_sources() if x["id"] == source_id), [])
         upstream = models[0]["upstream_name"] if models else "default"
-        status, message = await health_check(source, upstream)
+        lease = None
+        if source.get("kind") == "web":
+            lease = await source_scheduler.acquire(source["id"], source_concurrency(source))
+        try:
+            status, message = await health_check(source, upstream)
+        finally:
+            if lease:
+                await lease.release()
         storage.update_health(source_id, status, message)
         return {"status": status, "message": message}
 

@@ -4,9 +4,10 @@ import json
 import sqlite3
 import threading
 import uuid
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .security import SecretBox, hash_token, new_gateway_token, verify_token
 
@@ -26,12 +27,20 @@ class Storage:
         self._import_ccswitch_deepseek()
         self._seed_api_source_icons()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.path, timeout=10)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA journal_mode=WAL")
-        return conn
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def _init_schema(self) -> None:
         with self._connect() as db:
@@ -87,6 +96,8 @@ class Storage:
 
     def _seed_sources(self) -> None:
         seeds = [
+            ("web-auto", "WebAuto", "web_auto", "", "web-auto", "auto", True,
+             "自动选择可用的 Web 来源。优先级固定为 DeepSeek Web → 千问 Web → 豆包 Web → 其他来源；它不需要单独填写浏览器凭据。"),
             ("web-doubao", "豆包 Web", "doubao_web", "https://www.doubao.com", "doubao-web", "0", True,
              "1. 先打开 F12 → Network，确认左上角录制按钮是红色。注意：已经显示在页面上的历史回复不会补录进 Network。\n2. 选择 Fetch/XHR，过滤框输入：completion\n3. 保持 Network 开着，此时再从豆包输入框发送一条全新消息。\n4. 选择名称为 completion、方法为 POST、类型为 fetch 的新请求；请求 URL 应以 https://www.doubao.com/chat/completion 开头。\n5. 确认查询参数里同时有 a_bogus 与 msToken，然后右键 Copy → Copy as cURL (bash)。\n如果发送全新消息后仍然没有结果：清空过滤框、切回“全部”，再发送一次并导出 HAR；这通常表示豆包已对当前账号切换了请求路径。"),
             ("web-qwen", "千问 Web", "qwen_web", "https://chat.qwen.ai", "qwen-web", "qwen3.7-plus", True,
@@ -107,8 +118,14 @@ class Storage:
                 )
                 row = db.execute("SELECT config_json FROM sources WHERE id=?", (sid,)).fetchone()
                 config = json.loads(row["config_json"] or "{}")
+                changed = False
                 if config.get("guide") != guide:
                     config["guide"] = guide
+                    changed = True
+                if protocol != "web_auto" and "max_concurrency" not in config:
+                    config["max_concurrency"] = 3
+                    changed = True
+                if changed:
                     db.execute("UPDATE sources SET config_json=?,updated_at=? WHERE id=?", (json.dumps(config, ensure_ascii=False), stamp, sid))
                 db.execute(
                     "INSERT OR IGNORE INTO models(id,source_id,public_name,upstream_name,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
@@ -159,8 +176,9 @@ class Storage:
             return
 
     def _seed_api_source_icons(self) -> None:
+        official_deepseek = (Path(__file__).resolve().parents[1] / "public" / "admin" / "providers" / "deepseek.svg").read_text(encoding="utf-8")
         icons = {
-            "api-deepseek": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="M5 17.5c3.1 1.1 5.7.8 7.8-.9 1.5 2 3.7 3.1 6.5 3.1 3.2 0 5.8-1.3 7.7-4.1-.1 6.7-4.5 11.2-11.1 11.2C9.8 26.8 5.6 23.2 5 17.5Z"/><path d="M18.8 8.2c2.6.1 4.5 1.2 5.6 3.4-2.4 1.1-4.6 1-6.5-.3-1.3-.9-2.2-2.1-2.8-3.7 1.2.4 2.4.6 3.7.6Z"/></g></svg>',
+            "api-deepseek": official_deepseek,
         }
         with self._connect() as db:
             for source_id, icon_svg in icons.items():
@@ -168,7 +186,8 @@ class Storage:
                 if not row:
                     continue
                 config = json.loads(row["config_json"] or "{}")
-                if "icon_svg" in config:
+                current = str(config.get("icon_svg") or "")
+                if current and "M5 17.5c3.1" not in current:
                     continue
                 config["icon_svg"] = icon_svg
                 db.execute(
@@ -184,14 +203,28 @@ class Storage:
         item["has_credential"] = bool(item.pop("credential_cipher"))
         return item
 
-    def list_sources(self) -> list[dict[str, Any]]:
+    def list_sources(self, include_secret: bool = False) -> list[dict[str, Any]]:
         with self._connect() as db:
-            rows = db.execute("SELECT * FROM sources ORDER BY kind DESC, created_at").fetchall()
+            rows = db.execute(
+                """SELECT * FROM sources
+                   ORDER BY CASE
+                       WHEN id='web-auto' THEN 0
+                       WHEN id='web-deepseek' THEN 1
+                       WHEN id='web-qwen' THEN 2
+                       WHEN id='web-doubao' THEN 3
+                       WHEN id='web-yuanbao' THEN 4
+                       WHEN id='web-kimi' THEN 5
+                       WHEN kind='web' THEN 6
+                       ELSE 7
+                   END, created_at"""
+            ).fetchall()
             result = []
             for row in rows:
                 models = [dict(x) | {"enabled": bool(x["enabled"])} for x in db.execute("SELECT * FROM models WHERE source_id=? ORDER BY created_at", (row["id"],))]
                 item = self._source_public(row)
                 item["models"] = models
+                if include_secret:
+                    item["credential"] = self.secrets.decrypt_json(row["credential_cipher"])
                 result.append(item)
             return result
 
@@ -218,6 +251,12 @@ class Storage:
             if config is None and old:
                 config = json.loads(old["config_json"] or "{}")
             config = config or {}
+            if data.get("kind", "api") == "web" and data.get("protocol") != "web_auto":
+                try:
+                    max_concurrency = int(config.get("max_concurrency", 3))
+                except (TypeError, ValueError):
+                    max_concurrency = 3
+                config["max_concurrency"] = max(1, min(32, max_concurrency))
             db.execute(
                 """INSERT INTO sources(id,name,kind,protocol,base_url,enabled,config_json,credential_cipher,health_status,health_message,created_at,updated_at)
                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)

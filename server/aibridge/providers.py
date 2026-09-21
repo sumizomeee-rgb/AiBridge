@@ -297,6 +297,33 @@ def _parse_deepseek_stream(raw: str) -> list[CanonicalEvent]:
     return events
 
 
+def _deepseek_stream_hint(raw: str) -> str:
+    """Describe an unrecognised response without persisting prompts or answer text."""
+    if not raw.strip():
+        return "HTTP 200 空响应"
+    markers: list[str] = []
+    for line in raw.splitlines()[:80]:
+        if not line.startswith("data:"):
+            continue
+        try:
+            data = json.loads(line[5:].strip())
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        for key in ("code", "biz_code", "status", "msg", "biz_msg", "error"):
+            value = data.get(key)
+            if value not in (None, "", 0) and not isinstance(value, (dict, list)):
+                markers.append(f"{key}={re.sub(r'\s+', ' ', str(value))[:80]}")
+        if data.get("p") is not None or data.get("o") is not None:
+            markers.append(f"event={data.get('o', '?')}:{data.get('p', '?')}")
+        if len(markers) >= 4:
+            break
+    if markers:
+        return "HTTP 200，" + "，".join(dict.fromkeys(markers))
+    return f"HTTP 200，未识别事件结构（{len(raw.encode(errors='replace'))} bytes）"
+
+
 async def _stream_qwen(source: dict[str, Any], req: CanonicalRequest) -> AsyncIterator[CanonicalEvent]:
     captured_url, headers = _web_headers(source)
     if not captured_url and not headers.get("cookie"):
@@ -447,7 +474,7 @@ async def _stream_deepseek(source: dict[str, Any], req: CanonicalRequest) -> Asy
 
     events = _parse_deepseek_stream(raw)
     if not events:
-        raise ProviderError("DeepSeek Web 响应中没有可识别的回答，登录态或协议可能已变化", "protocol_mismatch")
+        raise ProviderError(f"DeepSeek Web 响应中没有可识别的回答：{_deepseek_stream_hint(raw)}", "protocol_mismatch")
     for event in events:
         yield event
 

@@ -319,28 +319,22 @@ def flatten_prompt(req: CanonicalRequest) -> str:
     return "\n\n".join(parts)
 
 
-def flatten_web_prompt(req: CanonicalRequest, max_chars: int = 32000) -> str:
-    """把 API 对话压成网页提示，并为 Web 模型注入精简工具协议。"""
-    prefix: list[str] = []
-    latest_input = next(
-        (_history_content(message) for message in reversed(req.messages) if message.get("role") in {"user", "tool"}),
-        "",
-    )
-    if latest_input:
-        prefix.append(
-            "<aibridge_current_input>\n"
-            + _compact_text(latest_input, 3500)
-            + "\n</aibridge_current_input>"
-        )
+def flatten_web_prompt(req: CanonicalRequest) -> str:
+    """把 API 对话无损展开为网页提示，并为 Web 模型注入精简工具协议。
+
+    网页来源只有一个 prompt 文本通道，因此角色边界需要用标签表达；但请求正文、
+    system 和历史消息不能在网关内静默裁剪。上游若无法容纳完整输入，应返回明确错误。
+    """
+    sections: list[str] = []
     if req.system:
-        prefix.append(
+        sections.append(
             "<aibridge_system_constraints>\n"
-            + _compact_text(req.system, 3000)
+            + req.system
             + "\n</aibridge_system_constraints>"
         )
     if web_tool_bridge_enabled(req):
         tools_json = _tools_prompt_json(req.tools)
-        prefix.append(
+        sections.append(
             "<aibridge_tool_protocol>\n"
             "你是 API Agent 的模型核心。不得假装已经执行工具，也不得编造工具结果。\n"
             f"策略：{_tool_policy(req.tool_choice)}\n"
@@ -353,33 +347,24 @@ def flatten_web_prompt(req: CanonicalRequest, max_chars: int = 32000) -> str:
             + "\n</aibridge_tool_protocol>"
         )
 
-    entries: list[str] = []
-    for message in req.messages[-24:]:
+    latest_input_index = next(
+        (
+            index
+            for index in range(len(req.messages) - 1, -1, -1)
+            if req.messages[index].get("role") in {"user", "tool"}
+        ),
+        None,
+    )
+    for index, message in enumerate(req.messages):
         role = {"user": "用户", "assistant": "助手", "tool": "工具结果"}.get(message.get("role"), "消息")
         text = _history_content(message)
-        if text:
-            entries.append(f"{role}：\n{_compact_text(text, 9000)}")
-    header = "\n\n".join(prefix).strip()
-    budget = max(1000, max_chars - len(header) - 2)
-    selected: list[str] = []
-    used = 0
-    for entry in reversed(entries):
-        separator = 2 if selected else 0
-        remaining = budget - used - separator
-        if remaining <= 300:
-            break
-        selected.append(entry if len(entry) <= remaining else _compact_text(entry, remaining))
-        used += min(len(entry), remaining) + separator
-        if len(entry) > remaining:
-            break
-    selected.reverse()
-    history = "\n\n".join(selected).strip()
-    if len(selected) < len(entries):
-        history = "[较早的对话内容已由网关省略]\n\n" + history
-    prompt = "\n\n".join(part for part in (header, history) if part).strip()
-    if len(prompt) > max_chars:
-        prompt = _compact_text(prompt, max_chars)
-    return prompt
+        if not text:
+            continue
+        if index == latest_input_index:
+            sections.append(f"<aibridge_current_input>\n{text}\n</aibridge_current_input>")
+        else:
+            sections.append(f'<aibridge_message role="{role}">\n{text}\n</aibridge_message>')
+    return "\n\n".join(sections).strip()
 
 
 _WEB_TOOL_TAG = re.compile(
@@ -580,7 +565,9 @@ async def openai_sse(events: AsyncIterator[CanonicalEvent], request_id: str, mod
     usage: dict[str, int] = {}
     tools: list[dict[str, Any]] = []
     async for item in events:
-        if item.type == "text" and item.text:
+        if item.type == "keepalive":
+            yield b": aibridge-queued\n\n"
+        elif item.type == "text" and item.text:
             yield sse({"id": request_id, "object": "chat.completion.chunk", "created": created, "model": model, "choices": [{"index": 0, "delta": {"content": item.text}, "finish_reason": None}]})
         elif item.type == "reasoning" and item.reasoning:
             yield sse({"id": request_id, "object": "chat.completion.chunk", "created": created, "model": model, "choices": [{"index": 0, "delta": {"reasoning_content": item.reasoning}, "finish_reason": None}]})
@@ -600,7 +587,9 @@ async def anthropic_sse(events: AsyncIterator[CanonicalEvent], request_id: str, 
     yield sse({"type": "message_start", "message": {"id": request_id, "type": "message", "role": "assistant", "model": model, "content": [], "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": 0, "output_tokens": 0}}}, "message_start")
     yield sse({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}, "content_block_start")
     async for item in events:
-        if item.type == "text" and item.text:
+        if item.type == "keepalive":
+            yield b": aibridge-queued\n\n"
+        elif item.type == "text" and item.text:
             yield sse({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": item.text}}, "content_block_delta")
         elif item.type == "usage":
             usage.update(item.usage)

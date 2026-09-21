@@ -36,11 +36,12 @@ const icons = {
 };
 
 const providerMarks = {
-  "web-doubao": `<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M9 9.5c2.2-2.7 5.1-4 8.3-3.6 4.9.6 8.4 5.1 7.7 10-.8 5.8-6.6 9.7-12.2 7.7-4.4-1.6-6.9-6.4-5.4-10.8"/><path d="M8.5 8.2 7.4 13l4.8-.8M12 17.5c1.4 1.4 3.4 2 5.4 1.4 1.2-.3 2.2-1.1 2.8-2.1"/></svg>`,
-  "web-qwen": `<svg viewBox="0 0 32 32" aria-hidden="true"><path d="m16 4 3.7 4.2 5.5.6.6 5.5 4.2 3.7-4.2 3.7-.6 5.5-5.5.6L16 28l-3.7-4.2-5.5-.6-.6-5.5L2 14l4.2-3.7.6-5.5 5.5-.6Z"/><circle cx="16" cy="16" r="4.2"/></svg>`,
-  "web-deepseek": `<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 17.5c3.1 1.1 5.7.8 7.8-.9 1.5 2 3.7 3.1 6.5 3.1 3.2 0 5.8-1.3 7.7-4.1-.1 6.7-4.5 11.2-11.1 11.2C9.8 26.8 5.6 23.2 5 17.5Z"/><path d="M18.8 8.2c2.6.1 4.5 1.2 5.6 3.4-2.4 1.1-4.6 1-6.5-.3-1.3-.9-2.2-2.1-2.8-3.7 1.2.4 2.4.6 3.7.6ZM8.3 13.1c1.3-2 3.1-3.2 5.6-3.5"/></svg>`,
-  "web-yuanbao": `<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M7 11.5 11 6h10l4 5.5-2 13H9Z"/><path d="M11.5 12.5c1 2 2.5 3 4.5 3s3.5-1 4.5-3M12 21h8"/></svg>`,
-  "web-kimi": `<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M21.5 5.5A10.8 10.8 0 1 0 26 22.8 11.5 11.5 0 0 1 21.5 5.5Z"/><path d="m22.5 10 .8 1.7L25 12.5l-1.7.8-.8 1.7-.8-1.7-1.7-.8 1.7-.8Z"/></svg>`,
+  "web-auto": `<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M8 8.5h6.5M17.5 8.5H24M8 16h16M8 23.5h6.5M17.5 23.5H24"/><circle cx="16" cy="8.5" r="2"/><circle cx="16" cy="23.5" r="2"/></svg>`,
+  "web-deepseek": `<img src="/assets/providers/deepseek.svg" alt="">`,
+  "web-qwen": `<img src="/assets/providers/qwen.png" alt="">`,
+  "web-doubao": `<img src="/assets/providers/doubao.png" alt="">`,
+  "web-yuanbao": `<img src="/assets/providers/yuanbao.png" alt="">`,
+  "web-kimi": `<img src="/assets/providers/kimi.svg" alt="">`,
 };
 
 function apiProviderMark(source, fallback) {
@@ -67,13 +68,19 @@ function sourceCard(source) {
   const fallbackMark = `<span>${escapeHtml(initials)}</span>`;
   const providerMark = source.kind === "web" ? (providerMarks[source.id] || fallbackMark) : apiProviderMark(source, fallbackMark);
   const models = source.models.filter((x) => x.enabled).map((x) => `<span class="model-tag">${escapeHtml(x.public_name)}</span>`).join("") || `<span class="muted">暂无公开模型</span>`;
-  const type = source.kind === "web" ? "官网直连" : (source.protocol === "anthropic" ? "Anthropic API" : "OpenAI API");
+  const isAuto = source.id === "web-auto";
+  const type = isAuto ? "自动路由" : (source.kind === "web" ? "官网直连" : (source.protocol === "anthropic" ? "Anthropic API" : "OpenAI API"));
+  const endpoint = isAuto ? "DeepSeek → 千问 → 豆包" : source.base_url;
+  const runtime = source.runtime || {};
+  const capacity = source.kind === "web"
+    ? `<span class="capacity"><i></i>${isAuto ? `池 ${runtime.active || 0}/${runtime.limit || 0}` : `运行 ${runtime.active || 0}/${runtime.limit || 3}`}${runtime.queued ? ` · 排队 ${runtime.queued}` : ""}</span>`
+    : "";
   const actions = [iconButton("health", "activity", "测试连接"), iconButton("edit", "settings", "配置来源")];
   if (source.kind === "api" && source.protocol === "openai") actions.push(iconButton("discover", "sync", "同步模型"));
   if (source.kind === "api") actions.push(iconButton("delete", "trash", "删除来源", "danger"));
   return `<article class="source-row ${source.enabled ? "" : "disabled"}" data-source="${escapeHtml(source.id)}">
-    <div class="source-identity"><div class="provider-icon">${providerMark}</div><div><strong>${escapeHtml(source.name)}</strong><small>${escapeHtml(type)} · ${escapeHtml(source.base_url)}</small></div></div>
-    <div class="models">${models}</div>
+    <div class="source-identity"><div class="provider-icon ${isAuto ? "auto" : ""}">${providerMark}</div><div><strong>${escapeHtml(source.name)}</strong><small>${escapeHtml(type)} · ${escapeHtml(endpoint)}</small></div></div>
+    <div class="models-wrap"><div class="models">${models}</div>${capacity}</div>
     <div class="source-health"><span class="status ${statusClass}"><i></i>${escapeHtml(statusLabels[source.health_status] || "异常")}</span><span class="health-copy">${escapeHtml(source.health_message || "尚未检测")}</span>${source.last_checked_at ? `<time>${escapeHtml(formatTime(source.last_checked_at))}</time>` : ""}</div>
     <div class="row-actions">${sourceSwitch(source)}${actions.join("")}</div>
   </article>`;
@@ -126,6 +133,7 @@ function modelLines(source) {
 
 function openSource(source = null) {
   const isWeb = source?.kind === "web";
+  const isAuto = source?.id === "web-auto";
   $("#source-id").value = source?.id || "";
   $("#source-kind").value = source?.kind || "api";
   $("#dialog-title").textContent = source ? `配置 ${source.name}` : "添加标准 API";
@@ -140,10 +148,13 @@ function openSource(source = null) {
   $("#source-models").value = modelLines(source);
   $("#source-icon-svg").value = source?.config?.icon_svg || "";
   $("#web-public-name").value = source?.models?.[0]?.public_name || "";
+  $("#web-max-concurrency").value = source?.config?.max_concurrency || 3;
   $("#web-fields").hidden = !isWeb;
+  $("#web-credential-fields").hidden = isAuto;
+  $("#web-concurrency-wrap").hidden = isAuto;
   $("#name-wrap").hidden = isWeb;
   $("#protocol-wrap").hidden = isWeb;
-  $("#base-wrap").hidden = false;
+  $("#base-wrap").hidden = isAuto;
   $("#api-key-wrap").hidden = isWeb;
   $("#auth-wrap").hidden = isWeb;
   $("#api-icon-editor").hidden = isWeb;
@@ -174,7 +185,20 @@ $("#source-form").addEventListener("submit", async (event) => {
     const previous = old.models[0];
     const publicName = $("#web-public-name").value.trim();
     if (!publicName) return toast("请填写对外模型名", true);
-    Object.assign(body, { name: old.name, enabled: old.enabled, protocol: old.protocol, base_url: $("#source-base").value.trim(), config: old.config, curl: $("#source-curl").value.trim(), credential: { cookie: $("#source-cookie").value.trim() }, model: { id: previous?.id, public_name: publicName, upstream_name: previous?.upstream_name || "default", enabled: true } });
+    const isAuto = old.id === "web-auto";
+    const maxConcurrency = Math.max(1, Math.min(32, Number.parseInt($("#web-max-concurrency").value, 10) || 3));
+    Object.assign(body, {
+      name: old.name,
+      enabled: old.enabled,
+      protocol: old.protocol,
+      base_url: isAuto ? "" : $("#source-base").value.trim(),
+      config: isAuto ? old.config : { ...old.config, max_concurrency: maxConcurrency },
+      model: { id: previous?.id, public_name: publicName, upstream_name: previous?.upstream_name || (isAuto ? "auto" : "default"), enabled: true },
+    });
+    if (!isAuto) {
+      body.curl = $("#source-curl").value.trim();
+      body.credential = { cookie: $("#source-cookie").value.trim() };
+    }
   } else {
     const models = parseModels($("#source-models").value, old?.models || []);
     if (!models.length) return toast("至少配置一个模型映射", true);
@@ -271,3 +295,7 @@ let initialLogsCollapsed = false;
 try { initialLogsCollapsed = localStorage.getItem("aibridge.logs.collapsed") === "1"; } catch { /* 浏览器禁用存储时默认展开 */ }
 setLogsCollapsed(initialLogsCollapsed, false);
 load().catch((error) => toast(`无法加载控制台：${error.message}`, true));
+setInterval(() => {
+  if (document.hidden || $("#source-dialog").open || $("#token-dialog").open) return;
+  load().catch(() => { /* 后台刷新失败时保留当前界面 */ });
+}, 3000);

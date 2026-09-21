@@ -61,13 +61,18 @@
       </div>
 
       <div id="web-fields" hidden>
-        <div class="guide" id="web-guide"></div>
-        <label>浏览器请求 cURL<textarea id="source-curl" rows="7" placeholder="在 F12 Network 中右键请求 → Copy → Copy as cURL (bash)，然后完整粘贴到这里"></textarea><small>网关会自动提取 Cookie、请求地址和风控请求头。</small></label>
-        <label>对外模型名<input id="web-public-name" placeholder="例如 doubao-web"><small>下游 Agent 填写的模型名，不影响官网实际模型。</small></label>
-        <details class="advanced-fields">
-          <summary>手动 Cookie（通常不需要）</summary>
-          <label>Cookie<textarea id="source-cookie" rows="3" placeholder="仅当 Copy as cURL 未包含 Cookie 时填写"></textarea></label>
-        </details>
+        <div id="web-credential-fields">
+          <div class="guide" id="web-guide"></div>
+          <label>浏览器请求 cURL<textarea id="source-curl" rows="7" placeholder="在 F12 Network 中右键请求 → Copy → Copy as cURL (bash)，然后完整粘贴到这里"></textarea><small>网关会自动提取 Cookie、请求地址和风控请求头。</small></label>
+          <details class="advanced-fields">
+            <summary>手动 Cookie（通常不需要）</summary>
+            <label>Cookie<textarea id="source-cookie" rows="3" placeholder="仅当 Copy as cURL 未包含 Cookie 时填写"></textarea></label>
+          </details>
+        </div>
+        <div class="web-settings-grid">
+          <label>对外模型名<input id="web-public-name" placeholder="例如 doubao-web"><small>下游 Agent 填写的模型名，不影响官网实际模型。</small></label>
+          <label id="web-concurrency-wrap">最大并发<input id="web-max-concurrency" type="number" min="1" max="32" step="1" value="3"><small>仅限制此 Web 来源；超出的请求会排队。</small></label>
+        </div>
       </div>
 
       <div class="model-editor" id="api-model-editor">

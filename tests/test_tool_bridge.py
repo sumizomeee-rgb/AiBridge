@@ -137,22 +137,22 @@ class ToolBridgeTests(unittest.TestCase):
         self.assertEqual([], calls)
         self.assertEqual(raw, visible)
 
-    def test_long_latest_message_keeps_task_at_start_and_recent_tail(self) -> None:
+    def test_long_latest_message_is_preserved_once_without_gateway_truncation(self) -> None:
+        body = "TASK-AT-START\n" + ("runtime metadata " * 6000) + "\nRECENT-TAIL"
         req = from_anthropic(
             {
                 "model": "deepseek-web",
-                "messages": [
-                    {"role": "user", "content": "TASK-AT-START\n" + ("runtime metadata " * 3000) + "\nRECENT-TAIL"}
-                ],
+                "messages": [{"role": "user", "content": body}],
             },
             "default",
         )
-        prompt = flatten_web_prompt(req, max_chars=4000)
-        self.assertIn("TASK-AT-START", prompt)
-        self.assertIn("RECENT-TAIL", prompt)
-        self.assertLessEqual(len(prompt), 4050)
+        prompt = flatten_web_prompt(req)
+        self.assertIn(body, prompt)
+        self.assertEqual(1, prompt.count("TASK-AT-START"))
+        self.assertEqual(1, prompt.count("RECENT-TAIL"))
+        self.assertNotIn("[中间内容由网关压缩]", prompt)
 
-    def test_current_input_precedes_large_tool_catalog_and_prompt_stays_bounded(self) -> None:
+    def test_large_tool_catalog_does_not_truncate_system_or_current_input(self) -> None:
         large_tools = [
             {
                 "name": f"tool_{index}",
@@ -164,18 +164,40 @@ class ToolBridgeTests(unittest.TestCase):
             }
             for index in range(20)
         ]
+        system = "SYSTEM-START\n" + ("runtime information " * 3000) + "\nSYSTEM-END"
+        body = "CURRENT-REAL-TASK\n" + ("diff body " * 10000) + "\nOUTPUT-JSON-ONLY"
         req = from_anthropic(
             {
                 "model": "deepseek-web",
-                "system": "runtime information " * 2000,
-                "messages": [{"role": "user", "content": "CURRENT-REAL-TASK"}],
+                "system": system,
+                "messages": [{"role": "user", "content": body}],
                 "tools": large_tools,
             },
             "default",
         )
         prompt = flatten_web_prompt(req)
-        self.assertLess(prompt.index("CURRENT-REAL-TASK"), prompt.index("<aibridge_tool_protocol>"))
-        self.assertLessEqual(len(prompt), 32000)
+        self.assertIn(system, prompt)
+        self.assertIn(body, prompt)
+        self.assertEqual(1, prompt.count("CURRENT-REAL-TASK"))
+        self.assertIn("<aibridge_tool_protocol>", prompt)
+        self.assertNotIn("[中间内容由网关压缩]", prompt)
+
+    def test_harupulse_truncation_markers_remain_literal_request_content(self) -> None:
+        body = (
+            "变更文件：Product/Table/Share/Fuben/TransfiniteTower/Config.tab\n"
+            + ("+配置数据\n" * 12000)
+            + "[已截断：revision r1647989 的 diff 部分省略]\n"
+            + "[已截断：diff 行数超限，后续省略]\n"
+            + "只输出 JSON"
+        )
+        req = from_anthropic(
+            {"model": "deepseek-web", "messages": [{"role": "user", "content": body}]},
+            "default",
+        )
+        prompt = flatten_web_prompt(req)
+        self.assertIn(body, prompt)
+        self.assertEqual(1, prompt.count("revision r1647989"))
+        self.assertNotIn("[中间内容由网关压缩]", prompt)
 
 
 class AsyncToolBridgeTests(unittest.IsolatedAsyncioTestCase):
