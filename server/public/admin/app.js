@@ -36,7 +36,7 @@ const icons = {
 };
 
 const providerMarks = {
-  "web-auto": `<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M8 8.5h6.5M17.5 8.5H24M8 16h16M8 23.5h6.5M17.5 23.5H24"/><circle cx="16" cy="8.5" r="2"/><circle cx="16" cy="23.5" r="2"/></svg>`,
+  "web-auto": `<img src="/assets/favicon.svg" alt="">`,
   "web-deepseek": `<img src="/assets/providers/deepseek.svg" alt="">`,
   "web-qwen": `<img src="/assets/providers/qwen.png" alt="">`,
   "web-doubao": `<img src="/assets/providers/doubao.png" alt="">`,

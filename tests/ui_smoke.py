@@ -23,6 +23,7 @@ def main() -> None:
         assert page.locator(".source-row .provider-icon img").count() >= 6
         assert page.locator(".source-row").first.get_attribute("data-source") == "web-auto"
         auto = page.locator('.source-row[data-source="web-auto"]')
+        assert auto.locator('img[src="/assets/favicon.svg"]').count() == 1
         assert "池" in auto.locator(".capacity").inner_text()
         auto.get_by_role("button", name="配置来源").click()
         assert page.locator("#web-public-name").input_value() == "web-auto"
@@ -71,7 +72,7 @@ def main() -> None:
         assert perplexity.locator('img[src="/assets/providers/perplexity.svg"]').count() == 1
         perplexity.get_by_role("button", name="配置来源").click()
         assert "过滤 perplexity_ask" in page.locator("#web-guide").inner_text()
-        assert "x-pplx-account" in page.locator("#web-guide").inner_text()
+        assert "不是过滤关键词" in page.locator("#web-guide").inner_text()
         page.locator("[data-close]").first.click()
         wenxin = page.locator('.source-row[data-source="web-wenxin"]')
         assert "baidu_ai_logo" in (wenxin.locator(".provider-icon img").get_attribute("src") or "")

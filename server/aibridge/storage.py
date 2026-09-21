@@ -107,9 +107,9 @@ class Storage:
             ("web-yuanbao", "元宝 Web", "unsupported_web", "https://yuanbao.tencent.com", "yuanbao-web", "default", False,
              "此来源暂未接入，无需抓取 cURL。元宝网页请求依赖动态安全签名，当前不建议配置。"),
             ("web-kimi", "Kimi Web", "kimi_web", "https://www.kimi.com", "kimi-web", "k2d6-chat", False,
-             "F12 → 网络 → Fetch/XHR → 过滤 ChatService/Chat → 发送一条新消息 → 选择 POST 请求 → 右键复制 → Copy as cURL (bash)\n必须包含 Authorization；请勿使用 HAR。"),
+             "F12 → 网络 → Fetch/XHR → 过滤 ChatService/Chat → 发送一条新消息 → 选择 POST 请求 → 右键复制 → Copy as cURL (bash)\n必须包含 Authorization；该访问令牌约 15 分钟后过期，当前需重新复制。"),
             ("web-perplexity", "Perplexity Web", "perplexity_web", "https://www.perplexity.ai", "perplexity-web", "turbo", False,
-             "F12 → 网络 → Fetch/XHR → 过滤 perplexity_ask → 发送一条新消息 → 选择 POST 请求 → 右键复制 → Copy as cURL (bash)\n完整 cURL 应包含 x-pplx-account；登录账号请同时保留 Cookie。"),
+             "F12 → 网络 → Fetch/XHR → 先发送一条新消息 → 过滤 perplexity_ask（搜不到改搜 rest/sse，并切到“全部”）→ 选择 POST 请求 → 右键复制 → Copy as cURL (bash)\nx-pplx-account 是该请求“标头”里的账号标识，不是过滤关键词；选中请求后在 标头 → 请求标头 中确认。"),
             ("web-wenxin", "文心 Web", "wenxin_web", "https://wenxin.baidu.com", "wenxin-web", "smartMode", False,
              "F12 → 网络 → Fetch/XHR → 过滤 /aichat/api/conversation → 发送一条新消息 → 选择 POST 请求 → 右键复制 → Copy as cURL (bash)\n必须复制完整 cURL（HAR 会移除 Cookie）；请求正文需包含 chat_token。"),
         ]
