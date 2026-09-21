@@ -35,11 +35,20 @@ def web_source(source_id: str, name: str, protocol: str, model: str) -> dict:
 class FakeStorage:
     def __init__(self) -> None:
         self.sources = [
+            {
+                "id": "web-auto", "name": "WebAuto", "kind": "web", "protocol": "web_auto",
+                "enabled": True, "health_status": "unchecked", "has_credential": False,
+                "credential": {}, "config": {"routing_mode": "smart", "source_ids": []},
+                "models": [{"public_name": "web-auto", "upstream_name": "auto", "enabled": True}],
+            },
             web_source("web-deepseek", "DeepSeek Web", "deepseek_web", "deepseek-web"),
             web_source("web-qwen", "千问 Web", "qwen_web", "qwen-web"),
             web_source("web-doubao", "豆包 Web", "doubao_web", "doubao-web"),
         ]
         self.health_updates: list[tuple[str, str, str]] = []
+
+    def set_custom(self, source_ids: list[str]) -> None:
+        self.sources[0]["config"] = {"routing_mode": "custom", "source_ids": source_ids}
 
     def list_sources(self, include_secret: bool = False) -> list[dict]:
         sources = copy.deepcopy(self.sources)
@@ -102,6 +111,59 @@ class WebRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(text, "from:web-qwen:default")
         self.assertEqual(context.actual_source["id"], "web-qwen")
         self.assertIn("DeepSeek Web：临时协议异常", context.note)
+        self.assertEqual(storage.health_updates, [("web-deepseek", "protocol_mismatch", "临时协议异常")])
+        self.assertEqual(router.scheduler.snapshot()["active"], {})
+
+    async def test_direct_web_failure_updates_source_health_immediately(self) -> None:
+        storage = FakeStorage()
+
+        async def fake_stream(source: dict, request: CanonicalRequest):
+            raise ProviderError("Authorization Failed (invalid token)", "auth_expired")
+            yield
+
+        router = WebRouter(storage, SourceScheduler(), fake_stream, keepalive_seconds=0.01)
+        deepseek = storage.sources[1]
+        context = RouteContext(deepseek)
+        request = CanonicalRequest(model="deepseek-web", upstream_model="default", messages=[])
+
+        with self.assertRaisesRegex(ProviderError, "invalid token"):
+            await collect_events(router.stream(deepseek, request, context))
+        self.assertEqual(storage.health_updates, [("web-deepseek", "auth_expired", "Authorization Failed (invalid token)")])
+        self.assertEqual(router.scheduler.snapshot()["active"], {})
+
+    async def test_custom_route_keeps_disabled_unhealthy_source_and_exact_order(self) -> None:
+        storage = FakeStorage()
+        qwen = next(source for source in storage.sources if source["id"] == "web-qwen")
+        qwen["enabled"] = False
+        qwen["health_status"] = "auth_expired"
+        qwen["credential"] = {}
+        storage.set_custom(["web-qwen", "web-deepseek"])
+
+        router = WebRouter(storage, SourceScheduler())
+        candidates = router.configured_candidates()
+
+        self.assertEqual([source["id"] for source in candidates], ["web-qwen", "web-deepseek"])
+
+    async def test_custom_route_never_falls_back_after_selected_source_fails(self) -> None:
+        storage = FakeStorage()
+        storage.set_custom(["web-deepseek", "web-qwen"])
+        calls: list[str] = []
+
+        async def fake_stream(source: dict, request: CanonicalRequest):
+            calls.append(source["id"])
+            if source["id"] == "web-deepseek":
+                raise ProviderError("固定来源失败", "protocol_mismatch")
+            yield CanonicalEvent("text", text="unexpected fallback")
+
+        router = WebRouter(storage, SourceScheduler(), fake_stream, keepalive_seconds=0.01)
+        auto = storage.sources[0]
+        context = RouteContext(auto)
+        request = CanonicalRequest(model="web-auto", upstream_model="auto", messages=[])
+
+        with self.assertRaisesRegex(ProviderError, "固定来源失败"):
+            await collect_events(router.stream(auto, request, context))
+        self.assertEqual(calls, ["web-deepseek"])
+        self.assertEqual(storage.health_updates, [("web-deepseek", "protocol_mismatch", "固定来源失败")])
         self.assertEqual(router.scheduler.snapshot()["active"], {})
 
 
@@ -117,6 +179,11 @@ class StorageSeedTests(unittest.TestCase):
             )
             auto = sources[0]
             self.assertEqual(auto["models"][0]["public_name"], "web-auto")
+            self.assertEqual(auto["config"]["routing_mode"], "smart")
+            self.assertEqual(auto["config"]["source_ids"], [])
+            kimi = next(source for source in sources if source["id"] == "web-kimi")
+            self.assertEqual(kimi["protocol"], "kimi_web")
+            self.assertEqual(kimi["models"][0]["upstream_name"], "k2d6-chat")
             for source in sources[1:6]:
                 self.assertEqual(source["config"]["max_concurrency"], 3)
 

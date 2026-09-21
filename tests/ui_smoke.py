@@ -29,12 +29,22 @@ def main() -> None:
         assert not page.locator("#source-base").is_visible()
         assert not page.locator("#web-credential-fields").is_visible()
         assert not page.locator("#web-max-concurrency").is_visible()
+        if page.locator('input[name="auto-routing-mode"][value="smart"]').is_checked():
+            page.locator(".route-mode-options label").filter(has_text="自定义").click()
+        assert page.locator('input[name="auto-routing-mode"][value="custom"]').is_checked()
+        assert page.locator("#auto-custom-routing").is_visible()
+        assert page.locator("[data-auto-source]").count() >= 5
+        assert page.locator('[data-auto-source="web-kimi"]').is_enabled()
+        kimi_route = page.locator('[data-auto-source="web-kimi"]')
+        if not kimi_route.is_checked():
+            kimi_route.check()
+        assert int(page.locator("#auto-source-count").inner_text().split()[0]) >= 1
         page.locator("[data-close]").first.click()
         deepseek = page.locator('.source-row[data-source="api-deepseek"]')
         assert deepseek.locator(".status").inner_text() == "可用"
         qwen = page.locator('.source-row[data-source="web-qwen"]')
         qwen.get_by_role("button", name="配置来源").click()
-        assert "F12" in page.locator("#web-guide").inner_text()
+        assert "F12 → 网络 → Fetch/XHR" in page.locator("#web-guide").inner_text()
         assert "api/v2/chat/completions" in page.locator("#web-guide").inner_text()
         assert page.locator("#source-base").is_visible()
         assert page.locator("#web-public-name").is_visible()
@@ -43,8 +53,13 @@ def main() -> None:
         page.locator("[data-close]").first.click()
         doubao = page.locator('.source-row[data-source="web-doubao"]')
         doubao.get_by_role("button", name="配置来源").click()
-        assert "历史回复不会补录" in page.locator("#web-guide").inner_text()
-        assert "发送一条全新消息" in page.locator("#web-guide").inner_text()
+        assert "过滤 completion" in page.locator("#web-guide").inner_text()
+        assert "发送一条新消息" in page.locator("#web-guide").inner_text()
+        page.locator("[data-close]").first.click()
+        kimi = page.locator('.source-row[data-source="web-kimi"]')
+        kimi.get_by_role("button", name="配置来源").click()
+        assert "ChatService/Chat" in page.locator("#web-guide").inner_text()
+        assert "必须包含 Authorization" in page.locator("#web-guide").inner_text()
         page.locator("[data-close]").first.click()
         deepseek.get_by_role("button", name="配置来源").click()
         assert "deepseek-flash = deepseek-flash" in page.locator("#source-models").input_value()
@@ -56,7 +71,6 @@ def main() -> None:
         assert page.locator("#api-icon-editor").is_visible()
         assert page.locator("#source-icon-svg").input_value() == ""
         page.locator("[data-close]").first.click()
-        kimi = page.locator('.source-row[data-source="web-kimi"]')
         kimi_switch = kimi.get_by_role("switch")
         initial_enabled = kimi_switch.get_attribute("aria-checked")
         toggled_enabled = "false" if initial_enabled == "true" else "true"

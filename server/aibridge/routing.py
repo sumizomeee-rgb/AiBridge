@@ -12,8 +12,10 @@ from .storage import Storage
 
 AUTO_SOURCE_ID = "web-auto"
 AUTO_SOURCE_PROTOCOL = "web_auto"
+AUTO_MODE_SMART = "smart"
+AUTO_MODE_CUSTOM = "custom"
 WEB_SOURCE_PRIORITY = ("web-deepseek", "web-qwen", "web-doubao", "web-yuanbao", "web-kimi")
-SUPPORTED_WEB_PROTOCOLS = {"deepseek_web", "qwen_web", "doubao_web"}
+SUPPORTED_WEB_PROTOCOLS = {"deepseek_web", "qwen_web", "doubao_web", "kimi_web"}
 AUTO_ELIGIBLE_HEALTH = {"healthy", "unchecked"}
 DEFAULT_WEB_CONCURRENCY = 3
 MAX_WEB_CONCURRENCY = 32
@@ -139,18 +141,45 @@ class WebRouter:
         self.stream_factory = stream_factory
         self.keepalive_seconds = keepalive_seconds
 
+    def _record_source_failure(self, source: dict[str, Any], exc: Exception) -> None:
+        status = exc.status if isinstance(exc, ProviderError) else "upstream_error"
+        message = str(exc).strip() or type(exc).__name__
+        self.storage.update_health(source["id"], status, message)
+
+    @staticmethod
+    def _routing_policy(sources: dict[str, dict[str, Any]]) -> tuple[str, list[str]]:
+        config = (sources.get(AUTO_SOURCE_ID) or {}).get("config") or {}
+        mode = AUTO_MODE_CUSTOM if config.get("routing_mode") == AUTO_MODE_CUSTOM else AUTO_MODE_SMART
+        source_ids = config.get("source_ids") if isinstance(config.get("source_ids"), list) else []
+        selected = list(dict.fromkeys(
+            source_id for source_id in source_ids
+            if isinstance(source_id, str) and source_id != AUTO_SOURCE_ID
+        ))
+        return mode, selected
+
+    def routing_mode(self) -> str:
+        sources = {item["id"]: item for item in self.storage.list_sources()}
+        return self._routing_policy(sources)[0]
+
     def configured_candidates(self, *, require_healthy: bool = True) -> list[dict[str, Any]]:
         sources = {item["id"]: item for item in self.storage.list_sources(include_secret=True)}
+        mode, selected_ids = self._routing_policy(sources)
         result: list[dict[str, Any]] = []
-        for source_id in WEB_SOURCE_PRIORITY:
+        source_ids = selected_ids if mode == AUTO_MODE_CUSTOM else WEB_SOURCE_PRIORITY
+        for source_id in source_ids:
             source = sources.get(source_id)
-            if not source or not source.get("enabled") or source.get("protocol") not in SUPPORTED_WEB_PROTOCOLS:
+            if not source or source.get("kind") != "web" or source_id == AUTO_SOURCE_ID:
                 continue
-            if not source.get("credential"):
-                continue
-            if require_healthy and source.get("health_status") not in AUTO_ELIGIBLE_HEALTH:
-                continue
-            model = next((item for item in source.get("models") or [] if item.get("enabled")), None)
+            if mode == AUTO_MODE_SMART:
+                if not source.get("enabled") or source.get("protocol") not in SUPPORTED_WEB_PROTOCOLS:
+                    continue
+                if not source.get("credential"):
+                    continue
+                if require_healthy and source.get("health_status") not in AUTO_ELIGIBLE_HEALTH:
+                    continue
+                model = next((item for item in source.get("models") or [] if item.get("enabled")), None)
+            else:
+                model = next(iter(source.get("models") or []), None)
             if not model:
                 continue
             source["route_model"] = model
@@ -162,13 +191,18 @@ class WebRouter:
         active = snapshot["active"]
         waiting = snapshot["waiting"]
         public_by_id = {source["id"]: source for source in sources}
+        mode, selected_ids = self._routing_policy(public_by_id)
         candidates: list[dict[str, Any]] = []
-        for source_id in WEB_SOURCE_PRIORITY:
+        source_ids = selected_ids if mode == AUTO_MODE_CUSTOM else WEB_SOURCE_PRIORITY
+        for source_id in source_ids:
             source = public_by_id.get(source_id)
-            if not source or not source.get("enabled") or not source.get("has_credential"):
+            if not source or source.get("kind") != "web" or source_id == AUTO_SOURCE_ID:
                 continue
-            if source.get("protocol") not in SUPPORTED_WEB_PROTOCOLS or source.get("health_status") not in AUTO_ELIGIBLE_HEALTH:
-                continue
+            if mode == AUTO_MODE_SMART:
+                if not source.get("enabled") or not source.get("has_credential"):
+                    continue
+                if source.get("protocol") not in SUPPORTED_WEB_PROTOCOLS or source.get("health_status") not in AUTO_ELIGIBLE_HEALTH:
+                    continue
             candidates.append(source)
 
         for source in sources:
@@ -192,12 +226,16 @@ class WebRouter:
                 "sources": len(candidates),
             }
             if preferred:
-                auto["health_status"] = "healthy" if preferred.get("health_status") == "healthy" else "unchecked"
-                auto["health_message"] = f"当前首选 {preferred['name']} · {len(candidates)} 个来源可参与路由"
+                if mode == AUTO_MODE_CUSTOM:
+                    auto["health_status"] = preferred.get("health_status") or "unchecked"
+                    auto["health_message"] = f"自定义 · 首选 {preferred['name']} · {len(candidates)} 个来源（不按健康状态切换）"
+                else:
+                    auto["health_status"] = "healthy" if preferred.get("health_status") == "healthy" else "unchecked"
+                    auto["health_message"] = f"智能 · 当前首选 {preferred['name']} · {len(candidates)} 个来源可参与路由"
                 auto["last_checked_at"] = preferred.get("last_checked_at")
             else:
                 auto["health_status"] = "unconfigured"
-                auto["health_message"] = "没有已启用、已配置且状态可用的 Web 来源"
+                auto["health_message"] = "自定义名单为空" if mode == AUTO_MODE_CUSTOM else "没有已启用、已配置且状态可用的 Web 来源"
                 auto["last_checked_at"] = None
         return sources
 
@@ -251,10 +289,14 @@ class WebRouter:
             try:
                 async for event in self.stream_factory(source, req):
                     yield event
+            except Exception as exc:
+                self._record_source_failure(source, exc)
+                raise
             finally:
                 await lease.release()
             return
 
+        custom_mode = self.routing_mode() == AUTO_MODE_CUSTOM
         excluded: set[str] = set()
         while True:
             candidates = [item for item in self.configured_candidates() if item["id"] not in excluded]
@@ -282,11 +324,12 @@ class WebRouter:
                     yield event
                 return
             except Exception as exc:
+                self._record_source_failure(candidate, exc)
                 if emitted:
+                    raise
+                if custom_mode:
                     raise
                 excluded.add(candidate["id"])
                 context.fallback_errors.append(f"{candidate['name']}：{str(exc)[:120]}")
-                if isinstance(exc, ProviderError) and exc.status in {"auth_expired", "invalid_config"}:
-                    self.storage.update_health(candidate["id"], exc.status, str(exc))
             finally:
                 await lease.release()

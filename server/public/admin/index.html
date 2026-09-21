@@ -61,9 +61,23 @@
       </div>
 
       <div id="web-fields" hidden>
+        <section id="auto-routing-fields" class="auto-routing" hidden>
+          <fieldset class="route-mode">
+            <legend>路由策略</legend>
+            <div class="route-mode-options">
+              <label><input type="radio" name="auto-routing-mode" value="smart" checked><span><strong>智能</strong><small>只用当前健康、已启用的来源，失败时自动切换</small></span></label>
+              <label><input type="radio" name="auto-routing-mode" value="custom"><span><strong>自定义</strong><small>严格按你的名单调度，不检查状态、不做失败兜底</small></span></label>
+            </div>
+          </fieldset>
+          <div id="auto-custom-routing" hidden>
+            <div class="route-picker-head"><div><strong>参与路由的来源</strong><small>可选择未启用或不健康的来源；箭头用于调整优先级。</small></div><span id="auto-source-count">0 个</span></div>
+            <div id="auto-source-picker" class="route-picker"></div>
+            <p class="route-warning">请求只在这份名单中寻找空闲并发槽；选中来源后若卡住或失败，本次请求直接失败，不再切换。</p>
+          </div>
+        </section>
         <div id="web-credential-fields">
           <div class="guide" id="web-guide"></div>
-          <label>浏览器请求 cURL<textarea id="source-curl" rows="7" placeholder="在 F12 Network 中右键请求 → Copy → Copy as cURL (bash)，然后完整粘贴到这里"></textarea><small>网关会自动提取 Cookie、请求地址和风控请求头。</small></label>
+          <label>浏览器请求 cURL<textarea id="source-curl" rows="7" placeholder="F12 → 网络 → 找到对话请求 → 右键复制 → Copy as cURL (bash) → 完整粘贴到这里"></textarea><small>网关会自动提取 Cookie、请求地址和风控请求头。</small></label>
           <details class="advanced-fields">
             <summary>手动 Cookie（通常不需要）</summary>
             <label>Cookie<textarea id="source-cookie" rows="3" placeholder="仅当 Copy as cURL 未包含 Cookie 时填写"></textarea></label>

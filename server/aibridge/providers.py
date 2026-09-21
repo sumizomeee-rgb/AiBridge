@@ -202,6 +202,55 @@ async def _curl_post(url: str, headers: dict[str, str], body: dict[str, Any]) ->
         return response.status_code, response.text
 
 
+def _connect_message(payload: dict[str, Any]) -> bytes:
+    data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+    return b"\x00" + len(data).to_bytes(4, "big") + data
+
+
+def _pop_connect_frame(buffer: bytearray) -> tuple[int, dict[str, Any] | None] | None:
+    if len(buffer) < 5:
+        return None
+    flags = buffer[0]
+    length = int.from_bytes(buffer[1:5], "big")
+    if length > 8 * 1024 * 1024:
+        raise ProviderError("Kimi Connect 响应帧超过 8 MiB", "protocol_mismatch")
+    if len(buffer) < 5 + length:
+        return None
+    if flags & ~0x03:
+        raise ProviderError(f"Kimi Connect 使用了不支持的帧标志：{flags}", "protocol_mismatch")
+    if flags & 0x01:
+        raise ProviderError("Kimi Connect 压缩帧暂不支持", "protocol_mismatch")
+    payload = bytes(buffer[5:5 + length])
+    del buffer[:5 + length]
+    if not payload:
+        return flags, None
+    try:
+        message = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProviderError("Kimi Connect 响应包含无效 JSON", "protocol_mismatch") from exc
+    if not isinstance(message, dict):
+        raise ProviderError("Kimi Connect 响应事件格式异常", "protocol_mismatch")
+    return flags, message
+
+
+def _kimi_delta(message: dict[str, Any]) -> CanonicalEvent | None:
+    operation = str(message.get("op") or "")
+    mask = str(message.get("mask") or "")
+    block = message.get("block") or {}
+    if not isinstance(block, dict):
+        return None
+    if operation == "set" and mask in {"block.text", "block.think"}:
+        part = block.get("text" if mask == "block.text" else "think") or {}
+    elif operation == "append" and mask in {"block.text.content", "block.think.content"}:
+        part = block.get("text" if mask == "block.text.content" else "think") or {}
+    else:
+        return None
+    content = part.get("content") if isinstance(part, dict) else None
+    if not isinstance(content, str) or not content:
+        return None
+    return CanonicalEvent("reasoning", reasoning=content) if "think" in mask else CanonicalEvent("text", text=content)
+
+
 async def _curl_get(url: str, headers: dict[str, str]) -> tuple[int, str]:
     if CurlAsyncSession is not None:
         session = CurlAsyncSession(impersonate="chrome", timeout=30)
@@ -479,6 +528,89 @@ async def _stream_deepseek(source: dict[str, Any], req: CanonicalRequest) -> Asy
         yield event
 
 
+async def _stream_kimi(source: dict[str, Any], req: CanonicalRequest) -> AsyncIterator[CanonicalEvent]:
+    captured_url, captured_headers = _web_headers(source)
+    has_authorization = any(key.lower() == "authorization" for key in captured_headers)
+    if not captured_url or not has_authorization:
+        raise ProviderError("Kimi Web 需要包含 Authorization 的完整对话请求 cURL；HAR 通常会删除这个敏感字段", "invalid_config", 400)
+
+    parts = urlsplit(captured_url)
+    origin = f"{parts.scheme}://{parts.netloc}"
+    chat_url = f"{origin}/apiv2/kimi.gateway.chat.v1.ChatService/Chat"
+    replaced_headers = {"content-type", "accept", "connect-protocol-version", "origin", "referer", "cookie"}
+    headers = {
+        key: value for key, value in captured_headers.items()
+        if not key.lower().startswith("x-msh-")
+        and key.lower() != "x-traffic-id"
+        and key.lower() not in replaced_headers
+    }
+    headers.update({
+        "content-type": "application/connect+json",
+        "accept": "*/*",
+        "connect-protocol-version": "1",
+        "origin": origin,
+        "referer": f"{origin}/",
+    })
+    body = {
+        "chat_id": "",
+        "scenario": "SCENARIO_CHAT",
+        "tools": [],
+        "message": {
+            "id": "",
+            "parent_id": "",
+            "children_message_ids": [],
+            "role": "user",
+            "blocks": [{"id": "", "message_id": "", "text": {"content": flatten_web_prompt(req)}}],
+            "scenario": "SCENARIO_CHAT",
+            "labels": [],
+            "references": [],
+            "is_goal": False,
+        },
+        "options": {
+            "thinking": True,
+            "enable_plugin": False,
+            "reasoning_effort": "REASONING_EFFORT_NONE",
+            "model": req.upstream_model or "k2d6-chat",
+        },
+        "project_id": "",
+    }
+
+    timeout = httpx.Timeout(20, read=180, write=30, pool=10)
+    buffer = bytearray()
+    saw_content = False
+    saw_end = False
+    async with httpx.AsyncClient(timeout=timeout, http2=True, follow_redirects=True) as client:
+        async with client.stream("POST", chat_url, headers=headers, content=_connect_message(body)) as response:
+            if response.status_code >= 400:
+                raise classify_http(response.status_code, (await response.aread()).decode(errors="replace"))
+            async for chunk in response.aiter_bytes():
+                buffer.extend(chunk)
+                while True:
+                    frame = _pop_connect_frame(buffer)
+                    if frame is None:
+                        break
+                    flags, message = frame
+                    if flags & 0x02:
+                        error = (message or {}).get("error")
+                        if isinstance(error, dict):
+                            detail = f"{error.get('code', 'unknown')}: {error.get('message', 'upstream error')}"
+                            raise ProviderError(f"Kimi Connect 结束帧返回错误：{detail}", "upstream_error")
+                        saw_end = True
+                        continue
+                    if not message:
+                        continue
+                    event = _kimi_delta(message)
+                    if event:
+                        saw_content = True
+                        yield event
+    if buffer:
+        raise ProviderError("Kimi Connect 响应在帧中途结束", "protocol_mismatch")
+    if not saw_end:
+        raise ProviderError("Kimi Connect 响应缺少结束帧", "protocol_mismatch")
+    if not saw_content:
+        raise ProviderError("Kimi 响应中没有可识别的回答", "protocol_mismatch")
+
+
 async def _bridge_web_tools(
     events: AsyncIterator[CanonicalEvent],
     req: CanonicalRequest,
@@ -513,6 +645,9 @@ def stream_source(source: dict[str, Any], req: CanonicalRequest) -> AsyncIterato
     elif protocol == "deepseek_web":
         events = _stream_deepseek(source, req)
         dialect = "deepseek"
+    elif protocol == "kimi_web":
+        events = _stream_kimi(source, req)
+        dialect = "standard"
     else:
         raise ProviderError("该 Web 来源尚未实现直连适配器", "unsupported", 400)
     return _bridge_web_tools(events, req, dialect) if web_tool_bridge_enabled(req) else events

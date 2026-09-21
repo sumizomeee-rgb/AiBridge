@@ -97,17 +97,17 @@ class Storage:
     def _seed_sources(self) -> None:
         seeds = [
             ("web-auto", "WebAuto", "web_auto", "", "web-auto", "auto", True,
-             "自动选择可用的 Web 来源。优先级固定为 DeepSeek Web → 千问 Web → 豆包 Web → 其他来源；它不需要单独填写浏览器凭据。"),
+             "智能模式按 DeepSeek Web → 千问 Web → 豆包 Web → 其他来源自动选择；自定义模式只使用你指定的来源。它不需要单独填写浏览器凭据。"),
             ("web-doubao", "豆包 Web", "doubao_web", "https://www.doubao.com", "doubao-web", "0", True,
-             "1. 先打开 F12 → Network，确认左上角录制按钮是红色。注意：已经显示在页面上的历史回复不会补录进 Network。\n2. 选择 Fetch/XHR，过滤框输入：completion\n3. 保持 Network 开着，此时再从豆包输入框发送一条全新消息。\n4. 选择名称为 completion、方法为 POST、类型为 fetch 的新请求；请求 URL 应以 https://www.doubao.com/chat/completion 开头。\n5. 确认查询参数里同时有 a_bogus 与 msToken，然后右键 Copy → Copy as cURL (bash)。\n如果发送全新消息后仍然没有结果：清空过滤框、切回“全部”，再发送一次并导出 HAR；这通常表示豆包已对当前账号切换了请求路径。"),
+             "F12 → 网络 → Fetch/XHR → 过滤 completion → 发送一条新消息 → 选择 POST completion → 右键复制 → Copy as cURL (bash)\n请求地址必须包含 a_bogus 与 msToken；找不到时清空过滤后再发一次。"),
             ("web-qwen", "千问 Web", "qwen_web", "https://chat.qwen.ai", "qwen-web", "qwen3.7-plus", True,
-             "F12 → Network → Fetch/XHR，清空过滤框后发送一句测试消息。\n过滤框只输入：api/v2/chat/completions\n选择方法为 POST、请求 URL 包含 /api/v2/chat/completions 的那条，右键 Copy → Copy as cURL (bash)。完整 cURL 会同时包含 Cookie 与 bx 风控请求头。"),
+             "F12 → 网络 → Fetch/XHR → 过滤 api/v2/chat/completions → 发送一条新消息 → 选择 POST 请求 → 右键复制 → Copy as cURL (bash)\n完整 cURL 应包含 Cookie 与 bx 风控请求头。"),
             ("web-deepseek", "DeepSeek Web", "deepseek_web", "https://chat.deepseek.com", "deepseek-web", "default", True,
-             "F12 → Network → Fetch/XHR，清空过滤框后发送一句测试消息。\n过滤框只输入：api/v0/chat/completion\n选择方法为 POST、请求 URL 包含 /api/v0/chat/completion 的那条，右键 Copy → Copy as cURL (bash)。不要使用普通 HAR：Chrome 通常会从 HAR 删除 Authorization。PoW 与 HIF 由网关自动处理。"),
+             "F12 → 网络 → Fetch/XHR → 过滤 api/v0/chat/completion → 发送一条新消息 → 选择 POST 请求 → 右键复制 → Copy as cURL (bash)\n必须包含 Authorization；请勿使用 HAR。"),
             ("web-yuanbao", "元宝 Web", "unsupported_web", "https://yuanbao.tencent.com", "yuanbao-web", "default", False,
-             "此适配器尚未接入。后续录制一次完整对话 HAR 或提供 Copy as cURL 后再实现。"),
-            ("web-kimi", "Kimi Web", "unsupported_web", "https://www.kimi.com", "kimi-web", "default", False,
-             "此适配器尚未接入。后续录制一次完整对话 HAR 或提供 Copy as cURL 后再实现。"),
+             "暂不接入。元宝网页请求依赖动态安全签名，当前不建议配置。"),
+            ("web-kimi", "Kimi Web", "kimi_web", "https://www.kimi.com", "kimi-web", "k2d6-chat", False,
+             "F12 → 网络 → Fetch/XHR → 过滤 ChatService/Chat → 发送一条新消息 → 选择 POST 请求 → 右键复制 → Copy as cURL (bash)\n必须包含 Authorization；请勿使用 HAR。"),
         ]
         with self._connect() as db:
             for sid, name, protocol, base_url, public_name, upstream, enabled, guide in seeds:
@@ -116,7 +116,7 @@ class Storage:
                     "INSERT OR IGNORE INTO sources(id,name,kind,protocol,base_url,enabled,config_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                     (sid, name, "web", protocol, base_url, int(enabled), json.dumps({"guide": guide}, ensure_ascii=False), stamp, stamp),
                 )
-                row = db.execute("SELECT config_json FROM sources WHERE id=?", (sid,)).fetchone()
+                row = db.execute("SELECT config_json,protocol,credential_cipher FROM sources WHERE id=?", (sid,)).fetchone()
                 config = json.loads(row["config_json"] or "{}")
                 changed = False
                 if config.get("guide") != guide:
@@ -125,12 +125,24 @@ class Storage:
                 if protocol != "web_auto" and "max_concurrency" not in config:
                     config["max_concurrency"] = 3
                     changed = True
+                if protocol == "web_auto" and config.get("routing_mode") not in {"smart", "custom"}:
+                    config["routing_mode"] = "smart"
+                    config["source_ids"] = []
+                    changed = True
                 if changed:
                     db.execute("UPDATE sources SET config_json=?,updated_at=? WHERE id=?", (json.dumps(config, ensure_ascii=False), stamp, sid))
+                if sid == "web-kimi" and row["protocol"] == "unsupported_web":
+                    has_credential = bool(row["credential_cipher"])
+                    db.execute(
+                        "UPDATE sources SET protocol=?,health_status=?,health_message=?,last_checked_at=NULL,updated_at=? WHERE id=?",
+                        (protocol, "unchecked" if has_credential else "unconfigured", "等待健康检查" if has_credential else "尚未配置凭据", stamp, sid),
+                    )
                 db.execute(
                     "INSERT OR IGNORE INTO models(id,source_id,public_name,upstream_name,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
                     (f"model-{sid}", sid, public_name, upstream, int(enabled), stamp, stamp),
                 )
+                if sid == "web-kimi":
+                    db.execute("UPDATE models SET upstream_name=?,updated_at=? WHERE source_id=? AND upstream_name='default'", (upstream, stamp, sid))
 
     def _import_ccswitch_deepseek(self) -> None:
         with self._connect() as db:
@@ -257,6 +269,13 @@ class Storage:
                 except (TypeError, ValueError):
                     max_concurrency = 3
                 config["max_concurrency"] = max(1, min(32, max_concurrency))
+            if data.get("protocol") == "web_auto":
+                config["routing_mode"] = "custom" if config.get("routing_mode") == "custom" else "smart"
+                source_ids = config.get("source_ids") if isinstance(config.get("source_ids"), list) else []
+                config["source_ids"] = list(dict.fromkeys(
+                    source_id for source_id in source_ids
+                    if isinstance(source_id, str) and source_id != "web-auto"
+                ))
             db.execute(
                 """INSERT INTO sources(id,name,kind,protocol,base_url,enabled,config_json,credential_cipher,health_status,health_message,created_at,updated_at)
                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)

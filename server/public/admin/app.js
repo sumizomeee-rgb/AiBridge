@@ -70,7 +70,9 @@ function sourceCard(source) {
   const models = source.models.filter((x) => x.enabled).map((x) => `<span class="model-tag">${escapeHtml(x.public_name)}</span>`).join("") || `<span class="muted">暂无公开模型</span>`;
   const isAuto = source.id === "web-auto";
   const type = isAuto ? "自动路由" : (source.kind === "web" ? "官网直连" : (source.protocol === "anthropic" ? "Anthropic API" : "OpenAI API"));
-  const endpoint = isAuto ? "DeepSeek → 千问 → 豆包" : source.base_url;
+  const endpoint = isAuto
+    ? (source.config?.routing_mode === "custom" ? `自定义 · ${(source.config?.source_ids || []).length} 个来源` : "智能 · DeepSeek → 千问 → 豆包")
+    : source.base_url;
   const runtime = source.runtime || {};
   const capacity = source.kind === "web"
     ? `<span class="capacity"><i></i>${isAuto ? `池 ${runtime.active || 0}/${runtime.limit || 0}` : `运行 ${runtime.active || 0}/${runtime.limit || 3}`}${runtime.queued ? ` · 排队 ${runtime.queued}` : ""}</span>`
@@ -131,6 +133,40 @@ function modelLines(source) {
   return (source?.models || []).map((model) => `${model.public_name} = ${model.upstream_name}`).join("\n");
 }
 
+function autoMode() {
+  return document.querySelector('input[name="auto-routing-mode"]:checked')?.value || "smart";
+}
+
+function selectedAutoSourceIds() {
+  return [...document.querySelectorAll("[data-auto-source]:checked")].map((input) => input.dataset.autoSource);
+}
+
+function renderAutoSourcePicker(selectedIds = []) {
+  const sources = state.sources.filter((item) => item.kind === "web" && item.id !== "web-auto");
+  const selectedSet = new Set(selectedIds);
+  const byId = new Map(sources.map((source) => [source.id, source]));
+  const ordered = [
+    ...selectedIds.map((id) => byId.get(id)).filter(Boolean),
+    ...sources.filter((source) => !selectedSet.has(source.id)),
+  ];
+  $("#auto-source-picker").innerHTML = ordered.map((source) => {
+    const selected = selectedSet.has(source.id);
+    const selectedIndex = selectedIds.indexOf(source.id);
+    const mark = providerMarks[source.id] || `<span>${escapeHtml(source.name.slice(0, 2))}</span>`;
+    const stateText = `${source.enabled ? "已启用" : "未启用"} · ${statusLabels[source.health_status] || "异常"}`;
+    return `<div class="route-source ${selected ? "selected" : ""}" data-route-source="${escapeHtml(source.id)}">
+      <label class="route-source-main"><input type="checkbox" data-auto-source="${escapeHtml(source.id)}" ${selected ? "checked" : ""}><span class="provider-icon">${mark}</span><span class="route-source-copy"><strong>${escapeHtml(source.name)}</strong><span class="route-source-state">${escapeHtml(stateText)}</span></span></label>
+      <span class="route-order"><button type="button" data-route-move="up" aria-label="上移 ${escapeHtml(source.name)}" ${!selected || selectedIndex === 0 ? "disabled" : ""}>↑</button><button type="button" data-route-move="down" aria-label="下移 ${escapeHtml(source.name)}" ${!selected || selectedIndex === selectedIds.length - 1 ? "disabled" : ""}>↓</button></span>
+    </div>`;
+  }).join("");
+  $("#auto-source-count").textContent = `${selectedIds.length} 个`;
+}
+
+function syncAutoRoutingFields() {
+  const custom = autoMode() === "custom";
+  $("#auto-custom-routing").hidden = !custom;
+}
+
 function openSource(source = null) {
   const isWeb = source?.kind === "web";
   const isAuto = source?.id === "web-auto";
@@ -149,7 +185,13 @@ function openSource(source = null) {
   $("#source-icon-svg").value = source?.config?.icon_svg || "";
   $("#web-public-name").value = source?.models?.[0]?.public_name || "";
   $("#web-max-concurrency").value = source?.config?.max_concurrency || 3;
+  const routingMode = source?.config?.routing_mode === "custom" ? "custom" : "smart";
+  const modeInput = document.querySelector(`input[name="auto-routing-mode"][value="${routingMode}"]`);
+  if (modeInput) modeInput.checked = true;
+  renderAutoSourcePicker(source?.config?.source_ids || []);
+  syncAutoRoutingFields();
   $("#web-fields").hidden = !isWeb;
+  $("#auto-routing-fields").hidden = !isAuto;
   $("#web-credential-fields").hidden = isAuto;
   $("#web-concurrency-wrap").hidden = isAuto;
   $("#name-wrap").hidden = isWeb;
@@ -186,13 +228,16 @@ $("#source-form").addEventListener("submit", async (event) => {
     const publicName = $("#web-public-name").value.trim();
     if (!publicName) return toast("请填写对外模型名", true);
     const isAuto = old.id === "web-auto";
+    const routingMode = autoMode();
+    const sourceIds = selectedAutoSourceIds();
+    if (isAuto && routingMode === "custom" && !sourceIds.length) return toast("自定义路由至少选择一个来源", true);
     const maxConcurrency = Math.max(1, Math.min(32, Number.parseInt($("#web-max-concurrency").value, 10) || 3));
     Object.assign(body, {
       name: old.name,
       enabled: old.enabled,
       protocol: old.protocol,
       base_url: isAuto ? "" : $("#source-base").value.trim(),
-      config: isAuto ? old.config : { ...old.config, max_concurrency: maxConcurrency },
+      config: isAuto ? { ...old.config, routing_mode: routingMode, source_ids: sourceIds } : { ...old.config, max_concurrency: maxConcurrency },
       model: { id: previous?.id, public_name: publicName, upstream_name: previous?.upstream_name || (isAuto ? "auto" : "default"), enabled: true },
     });
     if (!isAuto) {
@@ -222,6 +267,23 @@ $("#source-form").addEventListener("submit", async (event) => {
     toast("来源配置已保存");
     await load();
   } catch (error) { toast(error.message, true); }
+});
+
+document.querySelectorAll('input[name="auto-routing-mode"]').forEach((input) => input.addEventListener("change", syncAutoRoutingFields));
+$("#auto-source-picker").addEventListener("change", (event) => {
+  if (!event.target.matches("[data-auto-source]")) return;
+  renderAutoSourcePicker(selectedAutoSourceIds());
+});
+$("#auto-source-picker").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-route-move]");
+  if (!button) return;
+  const sourceId = button.closest("[data-route-source]").dataset.routeSource;
+  const selected = selectedAutoSourceIds();
+  const index = selected.indexOf(sourceId);
+  const target = button.dataset.routeMove === "up" ? index - 1 : index + 1;
+  if (index < 0 || target < 0 || target >= selected.length) return;
+  [selected[index], selected[target]] = [selected[target], selected[index]];
+  renderAutoSourcePicker(selected);
 });
 
 document.addEventListener("click", async (event) => {

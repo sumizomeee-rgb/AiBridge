@@ -172,6 +172,39 @@ label.wide { grid-column: 1 / -1; }
 .guide { margin: 17px 0 14px; padding: 12px 13px; border: 1px solid #d8e3da; border-left: 3px solid var(--accent); border-radius: 9px; color: #4b584f; background: #eef3ed; font-size: 12px; white-space: pre-line; }
 #web-fields { display: grid; gap: 15px; }
 #web-credential-fields { display: grid; gap: 15px; }
+.auto-routing { display: grid; gap: 14px; }
+.route-mode { margin: 0; padding: 0; border: 0; }
+.route-mode legend { margin-bottom: 7px; color: var(--muted); font-size: 12px; }
+.route-mode-options { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.route-mode-options label { position: relative; cursor: pointer; }
+.route-mode-options input { position: absolute; opacity: 0; pointer-events: none; }
+.route-mode-options span { min-height: 64px; display: grid; align-content: center; gap: 3px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 11px; background: #fbfaf6; transition: border-color .16s ease, background .16s ease, box-shadow .16s ease, transform .16s ease; }
+.route-mode-options label:hover span { border-color: #b9c9bc; transform: translateY(-1px); }
+.route-mode-options input:checked + span { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px rgba(53, 111, 82, .08); }
+.route-mode-options input:focus-visible + span { outline: 2px solid rgba(53, 111, 82, .38); outline-offset: 2px; }
+.route-mode-options strong { color: var(--ink); font-size: 13px; }
+.route-mode-options small { color: var(--faint); font-size: 10px; line-height: 1.35; }
+#auto-custom-routing { display: grid; gap: 8px; }
+.route-picker-head { display: flex; align-items: end; justify-content: space-between; gap: 16px; }
+.route-picker-head strong, .route-picker-head small { display: block; }
+.route-picker-head strong { font-size: 12px; }
+.route-picker-head small { margin-top: 2px; color: var(--faint); font-size: 10px; }
+.route-picker-head > span { color: var(--accent); font: 650 10px/1 "Cascadia Code", monospace; }
+.route-picker { overflow: hidden; border: 1px solid var(--line); border-radius: 11px; background: #fffefa; }
+.route-source { min-height: 50px; display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 12px; padding: 7px 9px; border-bottom: 1px solid var(--line); transition: background .16s ease; }
+.route-source:last-child { border-bottom: 0; }
+.route-source.selected { background: #f2f6f0; }
+.route-source-main { display: flex; align-items: center; gap: 9px; cursor: pointer; }
+.route-source-main input { width: 15px; height: 15px; flex: 0 0 auto; accent-color: var(--accent); }
+.route-source .provider-icon { width: 30px; height: 30px; border-radius: 9px 9px 3px 9px; }
+.route-source .provider-icon img { width: 22px; height: 22px; }
+.route-source-copy { min-width: 0; display: flex; align-items: center; gap: 7px; }
+.route-source-copy strong { overflow: hidden; color: var(--ink); text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.route-source-state { color: var(--faint); font-size: 10px; white-space: nowrap; }
+.route-order { display: flex; gap: 3px; }
+.route-order button { width: 28px; height: 28px; display: grid; place-items: center; padding: 0; color: var(--muted); background: transparent; font-size: 15px; line-height: 1; }
+.route-order button:disabled { opacity: .24; cursor: default; }
+.route-warning { margin: 1px 1px 0; color: var(--warning); font-size: 10px; line-height: 1.45; }
 .web-settings-grid { display: grid; grid-template-columns: 1fr minmax(170px, .42fr); gap: 14px; }
 .advanced-fields { border-top: 1px solid var(--line); padding-top: 9px; }
 .advanced-fields summary { color: var(--muted); cursor: pointer; font-size: 11px; }
@@ -205,7 +238,7 @@ label.wide { grid-column: 1 / -1; }
   .models-wrap { padding-left: 45px; }
   .source-health { grid-row: auto; padding-left: 45px; }
   .row-actions { grid-column: 2; grid-row: 1 / 4; align-self: center; }
-  .access-head, .access-body, .form-grid, .web-settings-grid { grid-template-columns: 1fr; gap: 10px; }
+  .access-head, .access-body, .form-grid, .web-settings-grid, .route-mode-options { grid-template-columns: 1fr; gap: 10px; }
   .access-endpoint { min-width: 0; }
   .wide, .full { grid-column: auto !important; }
   .token-actions { justify-content: stretch; }
