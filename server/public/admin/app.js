@@ -27,15 +27,48 @@ function toast(message, error = false) {
   toast.timer = setTimeout(() => { node.className = ""; }, 3200);
 }
 
+const icons = {
+  activity: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2.2-5 4.1 10 2.2-5H21"/></svg>`,
+  settings: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6 1.7 1.7 0 0 0 10 3v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/></svg>`,
+  sync: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7h-5V2"/><path d="M20 7a8 8 0 0 0-13.7-2.4L4 7"/><path d="M4 17h5v5"/><path d="M4 17a8 8 0 0 0 13.7 2.4L20 17"/></svg>`,
+  trash: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5"/></svg>`,
+  refresh: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>`,
+};
+
+const providerMarks = {
+  "web-doubao": `<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M9 9.5c2.2-2.7 5.1-4 8.3-3.6 4.9.6 8.4 5.1 7.7 10-.8 5.8-6.6 9.7-12.2 7.7-4.4-1.6-6.9-6.4-5.4-10.8"/><path d="M8.5 8.2 7.4 13l4.8-.8M12 17.5c1.4 1.4 3.4 2 5.4 1.4 1.2-.3 2.2-1.1 2.8-2.1"/></svg>`,
+  "web-qwen": `<svg viewBox="0 0 32 32" aria-hidden="true"><path d="m16 4 3.7 4.2 5.5.6.6 5.5 4.2 3.7-4.2 3.7-.6 5.5-5.5.6L16 28l-3.7-4.2-5.5-.6-.6-5.5L2 14l4.2-3.7.6-5.5 5.5-.6Z"/><circle cx="16" cy="16" r="4.2"/></svg>`,
+  "web-deepseek": `<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 17.5c3.1 1.1 5.7.8 7.8-.9 1.5 2 3.7 3.1 6.5 3.1 3.2 0 5.8-1.3 7.7-4.1-.1 6.7-4.5 11.2-11.1 11.2C9.8 26.8 5.6 23.2 5 17.5Z"/><path d="M18.8 8.2c2.6.1 4.5 1.2 5.6 3.4-2.4 1.1-4.6 1-6.5-.3-1.3-.9-2.2-2.1-2.8-3.7 1.2.4 2.4.6 3.7.6ZM8.3 13.1c1.3-2 3.1-3.2 5.6-3.5"/></svg>`,
+  "web-yuanbao": `<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M7 11.5 11 6h10l4 5.5-2 13H9Z"/><path d="M11.5 12.5c1 2 2.5 3 4.5 3s3.5-1 4.5-3M12 21h8"/></svg>`,
+  "web-kimi": `<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M21.5 5.5A10.8 10.8 0 1 0 26 22.8 11.5 11.5 0 0 1 21.5 5.5Z"/><path d="m22.5 10 .8 1.7L25 12.5l-1.7.8-.8 1.7-.8-1.7-1.7-.8 1.7-.8Z"/></svg>`,
+};
+
+function apiProviderMark(source, fallback) {
+  const svg = String(source.config?.icon_svg || "").trim();
+  if (!svg || svg.length > 20000 || !/^<svg(?:\s|>)/i.test(svg) || !/<\/svg>$/i.test(svg)) return fallback;
+  const dataUrl = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  return `<img src="${escapeHtml(dataUrl)}" alt="">`;
+}
+
+function iconButton(action, icon, label, className = "") {
+  return `<button class="icon-action ${className}" data-action="${action}" data-tooltip="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${icons[icon]}</button>`;
+}
+
 function sourceCard(source) {
   const statusClass = statusLabels[source.health_status] ? source.health_status : "error";
   const initials = source.name.replace(/\s*Web|\s*官方/g, "").slice(0, 2).toUpperCase();
+  const fallbackMark = `<span>${escapeHtml(initials)}</span>`;
+  const providerMark = source.kind === "web" ? (providerMarks[source.id] || fallbackMark) : apiProviderMark(source, fallbackMark);
   const models = source.models.filter((x) => x.enabled).map((x) => `<span class="model-tag">${escapeHtml(x.public_name)}</span>`).join("") || `<span class="muted">暂无公开模型</span>`;
-  return `<article class="source-card ${source.enabled ? "" : "disabled"}" data-source="${escapeHtml(source.id)}">
-    <div class="card-top"><div class="card-title"><div class="provider-icon">${escapeHtml(initials)}</div><div><strong>${escapeHtml(source.name)}</strong><small>${source.kind === "web" ? "官网直连" : source.protocol.toUpperCase() + " COMPATIBLE"}</small></div></div><span class="status ${statusClass}">${escapeHtml(statusLabels[source.health_status] || "异常")}</span></div>
-    <p class="card-message">${escapeHtml(source.health_message || "尚未检测")}${source.last_checked_at ? `<br><small>${escapeHtml(formatTime(source.last_checked_at))}</small>` : ""}</p>
+  const type = source.kind === "web" ? "官网直连" : `${source.protocol.toUpperCase()} 兼容`;
+  const actions = [iconButton("health", "activity", "测试连接"), iconButton("edit", "settings", "配置来源")];
+  if (source.kind === "api" && source.protocol === "openai") actions.push(iconButton("discover", "sync", "同步模型"));
+  if (source.kind === "api") actions.push(iconButton("delete", "trash", "删除来源", "danger"));
+  return `<article class="source-row ${source.enabled ? "" : "disabled"}" data-source="${escapeHtml(source.id)}">
+    <div class="source-identity"><div class="provider-icon">${providerMark}</div><div><strong>${escapeHtml(source.name)}</strong><small>${escapeHtml(type)} · ${escapeHtml(source.base_url)}</small></div></div>
     <div class="models">${models}</div>
-    <div class="card-actions"><button data-action="health">健康测试</button><button data-action="edit">配置</button>${source.kind === "api" && source.protocol === "openai" ? `<button data-action="discover">同步模型</button>` : ""}${source.kind === "api" ? `<button class="danger" data-action="delete">删除</button>` : ""}</div>
+    <div class="source-health"><span class="status ${statusClass}"><i></i>${escapeHtml(statusLabels[source.health_status] || "异常")}</span><span class="health-copy">${escapeHtml(source.health_message || "尚未检测")}</span>${source.last_checked_at ? `<time>${escapeHtml(formatTime(source.last_checked_at))}</time>` : ""}</div>
+    <div class="row-actions">${actions.join("")}</div>
   </article>`;
 }
 
@@ -47,7 +80,7 @@ function renderSources() {
 }
 
 function renderKeys() {
-  $("#keys").innerHTML = state.keys.length ? state.keys.map((key) => `<div class="list-row"><div><strong>${escapeHtml(key.name)}</strong><br><code>${escapeHtml(key.prefix)}••••••••</code></div><small>${key.last_used_at ? `最后使用 ${escapeHtml(formatTime(key.last_used_at))}` : "尚未使用"}</small><button class="danger" data-key-delete="${escapeHtml(key.id)}">删除</button></div>`).join("") : `<div class="empty">尚未生成网关 Token</div>`;
+  $("#keys").innerHTML = state.keys.length ? state.keys.map((key) => `<div class="list-row"><div><strong>${escapeHtml(key.name)}</strong><br><code>${escapeHtml(key.prefix)}••••••••</code></div><small>${key.last_used_at ? `最后使用 ${escapeHtml(formatTime(key.last_used_at))}` : "尚未使用"}</small><button class="icon-action danger" data-key-delete="${escapeHtml(key.id)}" data-tooltip="删除 Token" aria-label="删除 Token">${icons.trash}</button></div>`).join("") : `<div class="empty">尚未生成网关 Token</div>`;
 }
 
 function formatTime(value) {
@@ -62,7 +95,6 @@ function renderLogs() {
 async function load() {
   state = await api("/api/state");
   $("#lan-url").textContent = state.gateway.lan_url;
-  $("#local-url").textContent = state.gateway.local_url;
   renderSources(); renderKeys(); renderLogs();
 }
 
@@ -85,13 +117,21 @@ function openSource(source = null) {
   $("#source-curl").value = "";
   $("#source-cookie").value = "";
   $("#source-models").value = modelLines(source);
+  $("#source-icon-svg").value = source?.config?.icon_svg || "";
+  $("#web-public-name").value = source?.models?.[0]?.public_name || "";
   $("#web-fields").hidden = !isWeb;
+  $("#name-wrap").hidden = isWeb;
   $("#protocol-wrap").hidden = isWeb;
-  $("#base-wrap").hidden = isWeb;
+  $("#base-wrap").hidden = false;
   $("#api-key-wrap").hidden = isWeb;
   $("#auth-wrap").hidden = isWeb;
+  $("#enabled-wrap").hidden = isWeb;
+  $("#api-icon-editor").hidden = isWeb;
+  $("#api-model-editor").hidden = isWeb;
+  $("#base-label").textContent = isWeb ? "官网地址" : "上游 Base URL";
+  $("#source-base").placeholder = isWeb ? "https://www.example.com" : "https://api.example.com";
   $("#web-guide").textContent = source?.config?.guide || "";
-  $("#model-help").textContent = isWeb ? "Web 来源只使用第一行；公开名可改，上游名通常保持不变" : "每行：公开名 = 上游模型名";
+  $("#model-help").textContent = "每行：公开名 = 上游模型名";
   $("#source-dialog").showModal();
 }
 
@@ -109,13 +149,26 @@ $("#source-form").addEventListener("submit", async (event) => {
   const id = $("#source-id").value;
   const kind = $("#source-kind").value;
   const old = state.sources.find((x) => x.id === id);
-  const models = parseModels($("#source-models").value, old?.models || []);
-  if (!models.length) return toast("至少配置一个模型映射", true);
   const body = { name: $("#source-name").value.trim(), kind, enabled: $("#source-enabled").checked };
   if (kind === "web") {
-    Object.assign(body, { protocol: old.protocol, base_url: old.base_url, config: old.config, curl: $("#source-curl").value.trim(), credential: { cookie: $("#source-cookie").value.trim() }, model: models[0] });
+    const previous = old.models[0];
+    const publicName = $("#web-public-name").value.trim();
+    if (!publicName) return toast("请填写对外模型名", true);
+    Object.assign(body, { name: old.name, enabled: old.enabled, protocol: old.protocol, base_url: $("#source-base").value.trim(), config: old.config, curl: $("#source-curl").value.trim(), credential: { cookie: $("#source-cookie").value.trim() }, model: { id: previous?.id, public_name: publicName, upstream_name: previous?.upstream_name || "default", enabled: true } });
   } else {
-    Object.assign(body, { protocol: $("#source-protocol").value, base_url: $("#source-base").value.trim(), config: { auth_mode: $("#source-auth").value, anthropic_version: "2023-06-01" }, models });
+    const models = parseModels($("#source-models").value, old?.models || []);
+    if (!models.length) return toast("至少配置一个模型映射", true);
+    Object.assign(body, {
+      protocol: $("#source-protocol").value,
+      base_url: $("#source-base").value.trim(),
+      config: {
+        ...(old?.config || {}),
+        auth_mode: $("#source-auth").value,
+        anthropic_version: "2023-06-01",
+        icon_svg: $("#source-icon-svg").value.trim(),
+      },
+      models,
+    });
     const key = $("#source-api-key").value.trim();
     if (key) body.credential = { api_key: key };
   }

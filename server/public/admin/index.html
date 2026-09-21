@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>AiBridge 控制台</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
   <link rel="stylesheet" href="/assets/styles.css">
 </head>
 <body>
@@ -20,36 +21,30 @@
         <h1>一个地址，接入所有模型。</h1>
         <p class="lede">局域网内的 Agent 只需要网关地址、Token 和公开模型名。OpenAI 与 Anthropic 客户端可直接复用同一套路由。</p>
       </div>
-      <div class="endpoint-panel">
-        <div class="endpoint"><span>局域网 Base URL</span><code id="lan-url">读取中…</code><button data-copy="lan-url">复制</button></div>
-        <div class="endpoint"><span>本机 Base URL</span><code id="local-url">读取中…</code><button data-copy="local-url">复制</button></div>
-        <p>OpenAI 使用 <b>/v1/chat/completions</b>，Anthropic 使用 <b>/v1/messages</b>。</p>
-      </div>
     </section>
-
-    <nav class="section-nav">
-      <a href="#sources">来源</a><a href="#tokens">访问 Token</a><a href="#logs">最近请求</a>
-    </nav>
 
     <section id="sources" class="block">
-      <div class="section-head"><div><p class="eyebrow">UPSTREAMS</p><h2>模型来源</h2></div><button class="primary" id="add-api">＋ 添加标准 API</button></div>
-      <div class="subhead"><h3>Web 官网直连</h3><span>每个网站对外提供一个公开模型名</span></div>
-      <div id="web-sources" class="source-grid"><div class="skeleton"></div><div class="skeleton"></div></div>
-      <div class="subhead api-head"><h3>标准 API</h3><span>一个来源可映射多个模型</span></div>
-      <div id="api-sources" class="source-grid"></div>
+      <div class="section-head"><div><p class="eyebrow">来源</p><h2>模型连接</h2></div><button class="primary" id="add-api">＋ 添加 API</button></div>
+      <div class="subhead"><h3>Web 官网直连</h3><span>一个网站对应一个公开模型名</span></div>
+      <div id="web-sources" class="source-list"><div class="skeleton"></div><div class="skeleton"></div></div>
+      <div class="subhead api-head"><h3>标准 API</h3><span>支持多个模型映射</span></div>
+      <div id="api-sources" class="source-list"></div>
     </section>
 
-    <section id="tokens" class="block split-block">
-      <div>
-        <p class="eyebrow">ACCESS</p><h2>网关 Token</h2>
-        <p class="muted">下游客户端可用 <code>Authorization: Bearer</code> 或 <code>x-api-key</code>。明文 Token 只展示一次。</p>
+    <section id="tokens" class="block access-block">
+      <div class="access-head">
+        <div><h3>网关接入</h3><p>局域网客户端共用同一个地址与 Token</p></div>
+        <div class="access-endpoint"><span>Base URL</span><code id="lan-url">读取中…</code><button data-copy="lan-url">复制</button></div>
       </div>
-      <div class="token-actions"><input id="key-name" placeholder="例如：Claude Code"><button class="primary" id="create-key">生成 Token</button></div>
-      <div id="keys" class="list full"></div>
+      <div class="access-body">
+        <div class="protocol-paths"><span>OpenAI <code>/v1/chat/completions</code></span><span>Anthropic <code>/v1/messages</code></span></div>
+        <div class="token-actions"><input id="key-name" placeholder="Token 名称，例如 Claude Code"><button class="primary" id="create-key">生成 Token</button></div>
+      </div>
+      <div id="keys" class="list"></div>
     </section>
 
     <section id="logs" class="block">
-      <div class="section-head"><div><p class="eyebrow">OBSERVABILITY</p><h2>最近请求</h2></div><button class="quiet" id="refresh">刷新</button></div>
+      <div class="section-head"><div><p class="eyebrow">记录</p><h2>最近请求</h2></div><button class="icon-action" id="refresh" data-tooltip="刷新请求记录" aria-label="刷新请求记录"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg></button></div>
       <div class="table-wrap"><table><thead><tr><th>时间</th><th>模型 / 来源</th><th>协议</th><th>状态</th><th>耗时</th><th>说明</th></tr></thead><tbody id="logs-body"></tbody></table></div>
     </section>
   </main>
@@ -60,24 +55,32 @@
       <input type="hidden" id="source-id">
       <input type="hidden" id="source-kind">
       <div class="form-grid">
-        <label>显示名称<input id="source-name" required></label>
+        <label id="name-wrap">显示名称<input id="source-name" required></label>
         <label id="protocol-wrap">上游协议<select id="source-protocol"><option value="anthropic">Anthropic 兼容</option><option value="openai">OpenAI 兼容</option></select></label>
-        <label class="wide" id="base-wrap">上游 Base URL<input id="source-base" placeholder="https://api.example.com"></label>
+        <label class="wide" id="base-wrap"><span id="base-label">上游 Base URL</span><input id="source-base" placeholder="https://api.example.com"></label>
         <label class="wide" id="api-key-wrap">上游 API Token<input id="source-api-key" type="password" autocomplete="off" placeholder="留空则保留现有 Token"></label>
         <label id="auth-wrap">Anthropic 鉴权方式<select id="source-auth"><option value="bearer">Authorization Bearer</option><option value="x-api-key">x-api-key</option></select></label>
-        <label class="toggle"><input id="source-enabled" type="checkbox"><span>启用此来源</span></label>
+        <label class="toggle" id="enabled-wrap"><input id="source-enabled" type="checkbox"><span>启用此来源</span></label>
       </div>
 
       <div id="web-fields" hidden>
         <div class="guide" id="web-guide"></div>
-        <label>完整 Copy as cURL（推荐）<textarea id="source-curl" rows="6" placeholder="curl 'https://...' -H 'cookie: ...'"></textarea></label>
-        <label>Cookie（如上面已含 Cookie 可留空）<textarea id="source-cookie" rows="3" placeholder="name=value; name2=value2"></textarea></label>
+        <label>浏览器请求 cURL<textarea id="source-curl" rows="7" placeholder="在 F12 Network 中右键请求 → Copy → Copy as cURL (bash)，然后完整粘贴到这里"></textarea><small>网关会自动提取 Cookie、请求地址和风控请求头。</small></label>
+        <label>对外模型名<input id="web-public-name" placeholder="例如 doubao-web"><small>下游 Agent 填写的模型名，不影响官网实际模型。</small></label>
+        <details class="advanced-fields">
+          <summary>手动 Cookie（通常不需要）</summary>
+          <label>Cookie<textarea id="source-cookie" rows="3" placeholder="仅当 Copy as cURL 未包含 Cookie 时填写"></textarea></label>
+        </details>
       </div>
 
-      <div class="model-editor">
+      <div class="model-editor" id="api-model-editor">
         <div class="subhead"><h3>模型映射</h3><span id="model-help">每行：公开名 = 上游名</span></div>
         <textarea id="source-models" rows="5" placeholder="my-model = upstream-model"></textarea>
       </div>
+      <details class="advanced-fields api-icon-editor" id="api-icon-editor">
+        <summary>管理台来源图标（可选）</summary>
+        <label>SVG 代码<textarea id="source-icon-svg" rows="5" placeholder="<svg viewBox=&quot;0 0 32 32&quot;>…</svg>"></textarea><small>仅用于管理台显示；留空则使用名称缩写。Web 来源图标由项目内置。</small></label>
+      </details>
       <div class="dialog-actions"><button type="button" class="quiet" data-close>取消</button><button type="submit" class="primary">保存配置</button></div>
     </form>
   </dialog>

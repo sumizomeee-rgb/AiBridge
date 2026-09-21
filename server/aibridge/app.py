@@ -234,8 +234,11 @@ def create_admin_app() -> FastAPI:
         if model:
             existing = old.get("models") or []
             storage.save_model(source_id, model["public_name"], model.get("upstream_name") or "default", model.get("enabled", True), model.get("id") or (existing[0]["id"] if existing else None))
-        for item in body.get("models") or []:
-            storage.save_model(source_id, item["public_name"], item.get("upstream_name") or item["public_name"], item.get("enabled", True), item.get("id"))
+        if "models" in body:
+            saved_model_ids = []
+            for item in body.get("models") or []:
+                saved_model_ids.append(storage.save_model(source_id, item["public_name"], item.get("upstream_name") or item["public_name"], item.get("enabled", True), item.get("id")))
+            storage.delete_models_except(source_id, saved_model_ids)
         return {"ok": True}
 
     @app.delete("/api/sources/{source_id}")

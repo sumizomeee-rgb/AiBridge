@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import shlex
+import shutil
+import subprocess
 import time
 import uuid
+from pathlib import Path
 from typing import Any, AsyncIterator
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -15,7 +19,7 @@ try:
 except (ImportError, OSError):
     CurlAsyncSession = None
 
-from .protocols import CanonicalEvent, CanonicalRequest, flatten_prompt, to_anthropic_upstream, to_openai_upstream
+from .protocols import CanonicalEvent, CanonicalRequest, flatten_web_prompt, to_anthropic_upstream, to_openai_upstream
 
 
 class ProviderError(RuntimeError):
@@ -198,6 +202,101 @@ async def _curl_post(url: str, headers: dict[str, str], body: dict[str, Any]) ->
         return response.status_code, response.text
 
 
+async def _curl_get(url: str, headers: dict[str, str]) -> tuple[int, str]:
+    if CurlAsyncSession is not None:
+        session = CurlAsyncSession(impersonate="chrome", timeout=30)
+        try:
+            response = await session.get(url, headers=headers)
+            return response.status_code, response.text
+        finally:
+            await session.close()
+    async with httpx.AsyncClient(timeout=30, http2=True, follow_redirects=True) as client:
+        response = await client.get(url, headers=headers)
+        return response.status_code, response.text
+
+
+async def _solve_deepseek_pow(challenge: dict[str, Any]) -> str:
+    node = shutil.which("node")
+    if not node:
+        raise ProviderError("DeepSeek Web 的 PoW 求解需要 Node.js 18+", "invalid_config", 500)
+    script = Path(__file__).with_name("deepseek_pow.js")
+    creationflags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+    process = await asyncio.create_subprocess_exec(
+        node, str(script),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        creationflags=creationflags,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(json.dumps(challenge, separators=(",", ":")).encode()),
+            timeout=20,
+        )
+    except TimeoutError as exc:
+        process.kill()
+        await process.wait()
+        raise ProviderError("DeepSeek Web 的 PoW 求解超时", "challenge") from exc
+    if process.returncode != 0:
+        detail = stderr.decode(errors="replace").strip()[:240]
+        raise ProviderError(f"DeepSeek Web 的 PoW 求解失败{': ' + detail if detail else ''}", "challenge")
+    value = stdout.decode().strip()
+    if not value:
+        raise ProviderError("DeepSeek Web 的 PoW 求解结果为空", "challenge")
+    return value
+
+
+def _deepseek_biz_data(raw: str, action: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw)
+        if payload.get("code") not in {None, 0}:
+            code = payload.get("code")
+            status = "auth_expired" if code in {40002, 40003} else "upstream_error"
+            raise ProviderError(f"DeepSeek {action}失败：{payload.get('msg') or code}", status)
+        data = payload.get("data", {}).get("biz_data", {})
+        if payload.get("data", {}).get("biz_code") not in {None, 0}:
+            raise ProviderError(f"DeepSeek {action}失败：{payload.get('data', {}).get('biz_msg') or payload.get('data', {}).get('biz_code')}", "upstream_error")
+        return data
+    except json.JSONDecodeError as exc:
+        raise ProviderError(f"DeepSeek {action}响应格式已变化", "protocol_mismatch") from exc
+
+
+def _parse_deepseek_stream(raw: str) -> list[CanonicalEvent]:
+    events: list[CanonicalEvent] = []
+    active_path = ""
+    active_operation = ""
+    fragment_type = "RESPONSE"
+    for line in raw.splitlines():
+        if not line.startswith("data:"):
+            continue
+        try:
+            data = json.loads(line[5:].strip())
+        except json.JSONDecodeError:
+            continue
+        if data.get("p") is not None:
+            active_path = str(data["p"])
+        if data.get("o") is not None:
+            active_operation = str(data["o"])
+        value = data.get("v")
+        if isinstance(value, dict):
+            response = value.get("response") or {}
+            for fragment in response.get("fragments") or []:
+                content = fragment.get("content")
+                if not isinstance(content, str) or not content:
+                    continue
+                fragment_type = str(fragment.get("type") or "RESPONSE")
+                if fragment_type in {"THINK", "THINKING", "REASONING"}:
+                    events.append(CanonicalEvent("reasoning", reasoning=content))
+                else:
+                    events.append(CanonicalEvent("text", text=content))
+        elif isinstance(value, str) and active_operation == "APPEND" and active_path.endswith("/content"):
+            if fragment_type in {"THINK", "THINKING", "REASONING"}:
+                events.append(CanonicalEvent("reasoning", reasoning=value))
+            else:
+                events.append(CanonicalEvent("text", text=value))
+    return events
+
+
 async def _stream_qwen(source: dict[str, Any], req: CanonicalRequest) -> AsyncIterator[CanonicalEvent]:
     captured_url, headers = _web_headers(source)
     if not captured_url and not headers.get("cookie"):
@@ -221,7 +320,7 @@ async def _stream_qwen(source: dict[str, Any], req: CanonicalRequest) -> AsyncIt
     body = {
         "stream": True, "version": "2.1", "incremental_output": True, "chatId": chat_id, "parentId": "", "chat_id": chat_id,
         "chat_mode": "normal", "model": req.upstream_model, "parent_id": None,
-        "messages": [{"id": None, "fid": fid, "parentId": None, "childrenIds": [str(uuid.uuid4())], "role": "user", "content": flatten_prompt(req), "user_action": "chat", "files": [], "timestamp": timestamp, "models": [req.upstream_model], "model": "", "chat_type": "t2t", "feature_config": {"thinking_enabled": True, "output_schema": "phase", "research_mode": "normal", "auto_thinking": True, "thinking_mode": "Auto", "thinking_format": "summary", "auto_search": False}, "extra": {"meta": {"subChatType": "t2t"}}, "sub_chat_type": "t2t", "parent_id": None}],
+        "messages": [{"id": None, "fid": fid, "parentId": None, "childrenIds": [str(uuid.uuid4())], "role": "user", "content": flatten_web_prompt(req), "user_action": "chat", "files": [], "timestamp": timestamp, "models": [req.upstream_model], "model": "", "chat_type": "t2t", "feature_config": {"thinking_enabled": True, "output_schema": "phase", "research_mode": "normal", "auto_thinking": True, "thinking_mode": "Auto", "thinking_format": "summary", "auto_search": False}, "extra": {"meta": {"subChatType": "t2t"}}, "sub_chat_type": "t2t", "parent_id": None}],
         "timestamp": timestamp,
     }
     status, raw = await _curl_post(completion_url, headers, body)
@@ -258,7 +357,7 @@ async def _stream_doubao(source: dict[str, Any], req: CanonicalRequest) -> Async
     local_id = f"local_{now_ms}{uuid.uuid4().int % 10000:04d}"
     body = {
         "client_meta": {"local_conversation_id": local_id, "conversation_id": "", "bot_id": "7338286299411103781", "last_section_id": "", "last_message_index": None, "local_permissions": []},
-        "messages": [{"local_message_id": str(uuid.uuid4()), "content_block": [{"block_type": 10000, "content": {"text_block": {"text": flatten_prompt(req), "icon_url": "", "icon_url_dark": "", "summary": ""}, "pc_event_block": ""}, "block_id": str(uuid.uuid4()), "parent_id": "", "meta_info": [], "append_fields": []}], "message_status": 0}],
+        "messages": [{"local_message_id": str(uuid.uuid4()), "content_block": [{"block_type": 10000, "content": {"text_block": {"text": flatten_web_prompt(req), "icon_url": "", "icon_url_dark": "", "summary": ""}, "pc_event_block": ""}, "block_id": str(uuid.uuid4()), "parent_id": "", "meta_info": [], "append_fields": []}], "message_status": 0}],
         "option": {"send_message_scene": "", "create_time_ms": now_ms, "collect_id": "", "is_audio": False, "answer_with_suggest": False, "agent_mode": 2, "tts_switch": False, "need_deep_think": 0, "click_clear_context": False, "from_suggest": False, "is_regen": False, "is_replace": False, "disable_sse_cache": False, "scene_type": 0, "unique_key": str(uuid.uuid4()), "start_seq": 0, "need_create_conversation": True, "conversation_init_option": {"need_ack_conversation": True}, "conversation_init_ext": {"model_item_key": req.upstream_model or "0", "reasoning_effort": "3", "mode_id": "1"}, "regen_query_id": [], "edit_query_id": [], "sse_recv_event_options": {"support_chunk_delta": True}, "support_lazy_fetch_stream": True, "is_old_user": True, "recovery_option": {"is_recovery": False, "req_create_time_sec": now_ms // 1000, "append_sse_event_scene": 0}, "message_storage_type": 0, "related_deleted_message_ids": {}, "connector_info_list": [], "model_config": {"model_item_key": req.upstream_model or "0", "model_extra_params": {}, "reasoning_effort": 3}, "aggregate_params": {"mention_skill_list": "[]", "mention_plugin_list": "[]", "mention_ext": "[{}]", "conversation_mode": "1", "mode_id": "1", "model_item_key": req.upstream_model or "0", "agent_mode": "2", "reasoning_effort": "3", "provider_id": ""}, "conversation_mode": 1},
         "user_context": [], "ext": {"agent_mode": "2", "use_deep_think": "0", "sub_conv_firstmet_type": "1", "collection_id": "", "is_finish": "1", "conversation_init_option": "{\"need_ack_conversation\":true}", "commerce_credit_config_enable": "0"},
     }
@@ -290,6 +389,69 @@ async def _stream_doubao(source: dict[str, Any], req: CanonicalRequest) -> Async
         raise ProviderError("豆包响应中没有 CHUNK_DELTA，签名/Cookie 可能已过期或协议已变化", "protocol_mismatch")
 
 
+async def _stream_deepseek(source: dict[str, Any], req: CanonicalRequest) -> AsyncIterator[CanonicalEvent]:
+    captured_url, headers = _web_headers(source)
+    if not captured_url or not any(key.lower() == "authorization" for key in headers):
+        raise ProviderError("DeepSeek Web 需要包含 Authorization 的完整对话请求 cURL；HAR 通常会删除这个敏感字段", "invalid_config", 400)
+    parts = urlsplit(captured_url)
+    origin = f"{parts.scheme}://{parts.netloc}"
+    completion_url = f"{origin}/api/v0/chat/completion"
+    common_headers = {key: value for key, value in headers.items() if key.lower() != "x-ds-pow-response"}
+    setup_headers = {key: value for key, value in common_headers.items() if key.lower() not in {"x-hif-leim", "x-hif-dliq"}}
+
+    status, raw = await _curl_post(f"{origin}/api/v0/chat_session/create", setup_headers, {})
+    if status >= 400:
+        raise classify_http(status, raw)
+    session_data = _deepseek_biz_data(raw, "新建会话")
+    session_id = session_data.get("chat_session", {}).get("id")
+    if not session_id:
+        raise ProviderError("DeepSeek 新建会话响应中没有会话 ID", "protocol_mismatch")
+
+    status, raw = await _curl_post(
+        f"{origin}/api/v0/chat/create_pow_challenge",
+        setup_headers,
+        {"target_path": "/api/v0/chat/completion"},
+    )
+    if status >= 400:
+        raise classify_http(status, raw)
+    challenge = _deepseek_biz_data(raw, "获取 PoW 挑战").get("challenge")
+    if not challenge:
+        raise ProviderError("DeepSeek PoW 响应中没有 challenge", "protocol_mismatch")
+    common_headers["x-ds-pow-response"] = await _solve_deepseek_pow(challenge)
+    try:
+        hif_status, hif_raw = await _curl_get(
+            "https://hif-leim.deepseek.com/query",
+            {key: value for key, value in common_headers.items() if key.lower() in {"accept", "accept-language", "user-agent"}},
+        )
+        if hif_status < 400:
+            hif_value = _deepseek_biz_data(hif_raw, "获取 HIF 签名").get("value")
+            if hif_value:
+                common_headers["x-hif-leim"] = hif_value
+    except (ProviderError, httpx.HTTPError, OSError):
+        pass
+
+    body = {
+        "chat_session_id": session_id,
+        "parent_message_id": None,
+        "model_type": req.upstream_model or "default",
+        "prompt": flatten_web_prompt(req),
+        "ref_file_ids": [],
+        "thinking_enabled": False,
+        "search_enabled": False,
+        "action": None,
+        "preempt": False,
+    }
+    status, raw = await _curl_post(completion_url, common_headers, body)
+    if status >= 400:
+        raise classify_http(status, raw)
+
+    events = _parse_deepseek_stream(raw)
+    if not events:
+        raise ProviderError("DeepSeek Web 响应中没有可识别的回答，登录态或协议可能已变化", "protocol_mismatch")
+    for event in events:
+        yield event
+
+
 def stream_source(source: dict[str, Any], req: CanonicalRequest) -> AsyncIterator[CanonicalEvent]:
     protocol = source["protocol"]
     if protocol == "openai":
@@ -300,6 +462,8 @@ def stream_source(source: dict[str, Any], req: CanonicalRequest) -> AsyncIterato
         return _stream_qwen(source, req)
     if protocol == "doubao_web":
         return _stream_doubao(source, req)
+    if protocol == "deepseek_web":
+        return _stream_deepseek(source, req)
     raise ProviderError("该 Web 来源尚未实现直连适配器", "unsupported", 400)
 
 

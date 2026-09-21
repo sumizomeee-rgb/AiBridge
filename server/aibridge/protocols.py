@@ -132,6 +132,22 @@ def flatten_prompt(req: CanonicalRequest) -> str:
     return "\n\n".join(parts)
 
 
+def flatten_web_prompt(req: CanonicalRequest, max_chars: int = 32000) -> str:
+    """把对话压成适合官网聊天框的文本，不转发 Agent 内部控制提示。"""
+    parts = []
+    for message in req.messages[-24:]:
+        role = {"user": "用户", "assistant": "助手", "tool": "工具结果"}.get(message.get("role"), "消息")
+        text = _text_content(message.get("content"))
+        if text:
+            parts.append(f"{role}：\n{text}")
+    prompt = "\n\n".join(parts).strip()
+    if not prompt and req.system:
+        prompt = req.system.strip()
+    if len(prompt) > max_chars:
+        prompt = "[较早的对话内容已由网关省略]\n\n" + prompt[-max_chars:]
+    return prompt
+
+
 async def collect_events(events: AsyncIterator[CanonicalEvent]) -> tuple[str, dict[str, int], list[dict[str, Any]]]:
     text_parts: list[str] = []
     usage: dict[str, int] = {}

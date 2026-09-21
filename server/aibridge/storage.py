@@ -24,6 +24,7 @@ class Storage:
         self._init_schema()
         self._seed_sources()
         self._import_ccswitch_deepseek()
+        self._seed_api_source_icons()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=10)
@@ -87,9 +88,11 @@ class Storage:
     def _seed_sources(self) -> None:
         seeds = [
             ("web-doubao", "豆包 Web", "doubao_web", "https://www.doubao.com", "doubao-web", "0", True,
-             "F12 → Network，发送一句测试消息，找到 /chat/completion，右键 Copy → Copy as cURL (bash)。推荐粘贴完整 cURL；仅 Cookie 往往不足以通过豆包的动态签名校验。"),
+             "F12 → Network → Fetch/XHR，清空过滤框后发送一句测试消息。\n过滤框只输入：chat/completion\n选择名称为 completion、方法为 POST、请求 URL 以 https://www.doubao.com/chat/completion 开头的那条，并确认查询参数里同时有 a_bogus 与 msToken。右键 Copy → Copy as cURL (bash)。"),
             ("web-qwen", "千问 Web", "qwen_web", "https://chat.qwen.ai", "qwen-web", "qwen3.7-plus", True,
-             "登录 chat.qwen.ai 后按 F12 → Network，发送一句测试消息，找到 /api/v2/chat/completions，右键 Copy → Copy as cURL (bash)。粘贴完整 cURL 可同时取得 Cookie 与 bx 风控请求头。"),
+             "F12 → Network → Fetch/XHR，清空过滤框后发送一句测试消息。\n过滤框只输入：api/v2/chat/completions\n选择方法为 POST、请求 URL 包含 /api/v2/chat/completions 的那条，右键 Copy → Copy as cURL (bash)。完整 cURL 会同时包含 Cookie 与 bx 风控请求头。"),
+            ("web-deepseek", "DeepSeek Web", "deepseek_web", "https://chat.deepseek.com", "deepseek-web", "default", True,
+             "F12 → Network → Fetch/XHR，清空过滤框后发送一句测试消息。\n过滤框只输入：api/v0/chat/completion\n选择方法为 POST、请求 URL 包含 /api/v0/chat/completion 的那条，右键 Copy → Copy as cURL (bash)。不要使用普通 HAR：Chrome 通常会从 HAR 删除 Authorization。PoW 与 HIF 由网关自动处理。"),
             ("web-yuanbao", "元宝 Web", "unsupported_web", "https://yuanbao.tencent.com", "yuanbao-web", "default", False,
              "此适配器尚未接入。后续录制一次完整对话 HAR 或提供 Copy as cURL 后再实现。"),
             ("web-kimi", "Kimi Web", "unsupported_web", "https://www.kimi.com", "kimi-web", "default", False,
@@ -102,6 +105,11 @@ class Storage:
                     "INSERT OR IGNORE INTO sources(id,name,kind,protocol,base_url,enabled,config_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                     (sid, name, "web", protocol, base_url, int(enabled), json.dumps({"guide": guide}, ensure_ascii=False), stamp, stamp),
                 )
+                row = db.execute("SELECT config_json FROM sources WHERE id=?", (sid,)).fetchone()
+                config = json.loads(row["config_json"] or "{}")
+                if config.get("guide") != guide:
+                    config["guide"] = guide
+                    db.execute("UPDATE sources SET config_json=?,updated_at=? WHERE id=?", (json.dumps(config, ensure_ascii=False), stamp, sid))
                 db.execute(
                     "INSERT OR IGNORE INTO models(id,source_id,public_name,upstream_name,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
                     (f"model-{sid}", sid, public_name, upstream, int(enabled), stamp, stamp),
@@ -150,6 +158,24 @@ class Storage:
         except (sqlite3.Error, ValueError, OSError, json.JSONDecodeError):
             return
 
+    def _seed_api_source_icons(self) -> None:
+        icons = {
+            "api-deepseek": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="M5 17.5c3.1 1.1 5.7.8 7.8-.9 1.5 2 3.7 3.1 6.5 3.1 3.2 0 5.8-1.3 7.7-4.1-.1 6.7-4.5 11.2-11.1 11.2C9.8 26.8 5.6 23.2 5 17.5Z"/><path d="M18.8 8.2c2.6.1 4.5 1.2 5.6 3.4-2.4 1.1-4.6 1-6.5-.3-1.3-.9-2.2-2.1-2.8-3.7 1.2.4 2.4.6 3.7.6Z"/></g></svg>',
+        }
+        with self._connect() as db:
+            for source_id, icon_svg in icons.items():
+                row = db.execute("SELECT config_json FROM sources WHERE id=? AND kind='api'", (source_id,)).fetchone()
+                if not row:
+                    continue
+                config = json.loads(row["config_json"] or "{}")
+                if "icon_svg" in config:
+                    continue
+                config["icon_svg"] = icon_svg
+                db.execute(
+                    "UPDATE sources SET config_json=?,updated_at=? WHERE id=?",
+                    (json.dumps(config, ensure_ascii=False), now_iso(), source_id),
+                )
+
     @staticmethod
     def _source_public(row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
@@ -197,8 +223,8 @@ class Storage:
                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(id) DO UPDATE SET name=excluded.name,kind=excluded.kind,protocol=excluded.protocol,base_url=excluded.base_url,
                    enabled=excluded.enabled,config_json=excluded.config_json,credential_cipher=excluded.credential_cipher,
-                   health_status=CASE WHEN excluded.credential_cipher IS NULL THEN 'unconfigured' ELSE sources.health_status END,
-                   health_message=CASE WHEN excluded.credential_cipher IS NULL THEN '尚未配置凭据' ELSE sources.health_message END,updated_at=excluded.updated_at""",
+                   health_status=CASE WHEN excluded.credential_cipher IS NULL THEN 'unconfigured' ELSE 'unchecked' END,
+                   health_message=CASE WHEN excluded.credential_cipher IS NULL THEN '尚未配置凭据' ELSE '配置已保存，等待健康检查' END,updated_at=excluded.updated_at""",
                 (source_id, data["name"], data.get("kind", "api"), data["protocol"], data.get("base_url", "").rstrip("/"), int(data.get("enabled", True)), json.dumps(config, ensure_ascii=False), cipher, "unchecked" if cipher else "unconfigured", "配置已保存，等待健康检查" if cipher else "尚未配置凭据", stamp, stamp),
             )
         return source_id
@@ -226,6 +252,14 @@ class Storage:
     def delete_model(self, model_id: str) -> None:
         with self._connect() as db:
             db.execute("DELETE FROM models WHERE id=?", (model_id,))
+
+    def delete_models_except(self, source_id: str, keep_ids: list[str]) -> None:
+        with self._connect() as db:
+            if keep_ids:
+                placeholders = ",".join("?" for _ in keep_ids)
+                db.execute(f"DELETE FROM models WHERE source_id=? AND id NOT IN ({placeholders})", (source_id, *keep_ids))
+            else:
+                db.execute("DELETE FROM models WHERE source_id=?", (source_id,))
 
     def resolve_model(self, public_name: str) -> tuple[dict[str, Any], dict[str, Any]] | None:
         with self._connect() as db:

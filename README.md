@@ -31,11 +31,13 @@ Token 既可放在 `Authorization: Bearer ...`，也可放在 Anthropic 常用�
 
 ## 来源类型
 
-- Web：豆包、千问等。每个来源对外暴露一个可编辑模型名。Cookie/cURL 只加密保存在 `server/data`，不会写入 Git。
+- Web：豆包、千问、DeepSeek 等。每个来源对外暴露一个可编辑模型名。Cookie/cURL 只加密保存在 `server/data`，不会写入 Git。
 - 标准 API：支持 OpenAI 兼容和 Anthropic 兼容上游，每个来源可以配置多个模型映射。
 
 首次启动会尝试从本机 CC Switch 的 Claude 配置导入 DeepSeek Anthropic 上游；只读取本机数据库，密钥不会输出到日志。
 
 ## 说明
 
-官网 Web 接口不是稳定公开 API。健康检查会真实访问上游，并区分未配置、鉴权失效、风控拦截、协议变化和网络错误，不会用静态“绿色”掩盖失败。豆包的请求含动态签名，建议按管理台提示从 F12 复制完整 cURL；千问通常需要 Cookie 与风控请求头。
+官网 Web 接口不是稳定公开 API。健康检查会真实访问上游，并区分未配置、鉴权失效、风控拦截、协议变化和网络错误，不会用静态“绿色”掩盖失败。豆包的请求含动态签名，建议按管理台提示从 F12 复制完整 cURL；千问通常需要 Cookie 与风控请求头；DeepSeek 每次对话需要 Node.js 18+ 调用官网 WASM 完成 PoW。
+
+Web 来源会过滤 Claude Code 等 Agent 注入的大段内部系统提示和工具定义，只把实际对话送入官网聊天框。这能避免普通问候被官网内容审核误伤，但 Web 来源目前定位为文本对话兼容；需要可靠工具调用时应使用标准 API 来源。
