@@ -9,6 +9,14 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
 
+WEB_PROMPT_MAX_CHARS = 120_000
+_WEB_SYSTEM_MAX_CHARS = 24_000
+_WEB_FIRST_TASK_MAX_CHARS = 8_000
+_WEB_RECENT_TOOL_MAX_CHARS = 16_000
+_WEB_HISTORY_MESSAGE_MAX_CHARS = 24_000
+_WEB_IMAGE_TYPES = {"image", "image_url", "input_image"}
+
+
 @dataclass
 class CanonicalRequest:
     model: str
@@ -57,6 +65,18 @@ def _compact_text(text: str, max_chars: int) -> str:
     tail = available - head
     tail_text = normalized[-tail:].lstrip() if tail else ""
     return normalized[:head].rstrip() + marker + tail_text
+
+
+def _clip_middle(text: str, max_chars: int) -> str:
+    """保留首尾原貌地裁剪大段上下文，避免破坏代码缩进与工具结果格式。"""
+    value = text.replace("\x00", "")
+    if len(value) <= max_chars:
+        return value
+    marker = "\n...[中间内容由网关为稳定性省略]...\n"
+    available = max(0, max_chars - len(marker))
+    head = available * 2 // 3
+    tail = available - head
+    return value[:head] + marker + (value[-tail:] if tail else "")
 
 
 def _compact_schema(schema: Any, depth: int = 0) -> dict[str, Any]:
@@ -231,6 +251,57 @@ def _history_content(message: dict[str, Any]) -> str:
     return "\n".join(part for part in parts if part)
 
 
+def _image_block_count(content: Any) -> int:
+    if isinstance(content, list):
+        return sum(_image_block_count(block) for block in content)
+    if not isinstance(content, dict):
+        return 0
+    count = 1 if str(content.get("type") or "").lower() in _WEB_IMAGE_TYPES else 0
+    nested = content.get("content")
+    return count + (_image_block_count(nested) if nested is not None else 0)
+
+
+def _web_message_text(message: dict[str, Any]) -> str:
+    text = _history_content(message)
+    image_count = _image_block_count(message.get("content"))
+    if image_count:
+        media_notice = (
+            f'<aibridge_media_unavailable count="{image_count}">'
+            "当前 Web 线路没有接收这些图片的内容。不得声称已经查看，也不得猜测图片；"
+            "若任务依赖图片，请自然说明当前无法读取图片，并继续处理可见文字。"
+            "</aibridge_media_unavailable>"
+        )
+        text = "\n".join(part for part in (text, media_notice) if part)
+    return text
+
+
+def _has_tool_context(message: dict[str, Any]) -> bool:
+    if message.get("role") == "tool" or message.get("tool_calls"):
+        return True
+    content = message.get("content")
+    return isinstance(content, list) and any(
+        isinstance(block, dict) and block.get("type") in {"tool_use", "tool_result"}
+        for block in content
+    )
+
+
+def _web_message_section(
+    message: dict[str, Any],
+    *,
+    current: bool,
+    max_content_chars: int | None = None,
+) -> str:
+    text = _web_message_text(message)
+    if not text:
+        return ""
+    if max_content_chars is not None:
+        text = _clip_middle(text, max_content_chars)
+    if current:
+        return f"<aibridge_current_input>\n{text}\n</aibridge_current_input>"
+    role = {"user": "用户", "assistant": "助手", "tool": "工具结果"}.get(message.get("role"), "消息")
+    return f'<aibridge_message role="{role}">\n{text}\n</aibridge_message>'
+
+
 def from_openai(body: dict[str, Any], upstream_model: str) -> CanonicalRequest:
     system_parts: list[str] = []
     messages: list[dict[str, Any]] = []
@@ -320,21 +391,17 @@ def flatten_prompt(req: CanonicalRequest) -> str:
 
 
 def flatten_web_prompt(req: CanonicalRequest) -> str:
-    """把 API 对话无损展开为网页提示，并为 Web 模型注入精简工具协议。
-
-    网页来源只有一个 prompt 文本通道，因此角色边界需要用标签表达；但请求正文、
-    system 和历史消息不能在网关内静默裁剪。上游若无法容纳完整输入，应返回明确错误。
-    """
-    sections: list[str] = []
+    """将 API 对话压成稳定的网页提示，超限时优先保留起始任务与最近上下文。"""
+    fixed_sections: list[str] = []
     if req.system:
-        sections.append(
+        fixed_sections.append(
             "<aibridge_system_constraints>\n"
             + req.system
             + "\n</aibridge_system_constraints>"
         )
     if web_tool_bridge_enabled(req):
         tools_json = _tools_prompt_json(req.tools)
-        sections.append(
+        fixed_sections.append(
             "<aibridge_tool_protocol>\n"
             "你是 API Agent 的模型核心。不得假装已经执行工具，也不得编造工具结果。\n"
             f"策略：{_tool_policy(req.tool_choice)}\n"
@@ -355,16 +422,113 @@ def flatten_web_prompt(req: CanonicalRequest) -> str:
         ),
         None,
     )
-    for index, message in enumerate(req.messages):
-        role = {"user": "用户", "assistant": "助手", "tool": "工具结果"}.get(message.get("role"), "消息")
-        text = _history_content(message)
-        if not text:
+    if latest_input_index is None and req.messages:
+        latest_input_index = len(req.messages) - 1
+
+    full_message_sections = {
+        index: _web_message_section(message, current=index == latest_input_index)
+        for index, message in enumerate(req.messages)
+    }
+    full_prompt = "\n\n".join(
+        [*fixed_sections, *(section for section in full_message_sections.values() if section)]
+    ).strip()
+    if len(full_prompt) <= WEB_PROMPT_MAX_CHARS:
+        return full_prompt
+
+    reduced_fixed: list[str] = []
+    if req.system:
+        reduced_fixed.append(
+            "<aibridge_system_constraints>\n"
+            + _clip_middle(req.system, _WEB_SYSTEM_MAX_CHARS)
+            + "\n</aibridge_system_constraints>"
+        )
+    if web_tool_bridge_enabled(req):
+        reduced_fixed.append(fixed_sections[-1])
+    reduced_fixed.append(
+        "<aibridge_context_notice>"
+        "为避免 Web 上游因输入过长而失败，网关已省略部分较早内容；"
+        "优先依据起始任务、最近消息、工具结果和当前输入继续。"
+        "</aibridge_context_notice>"
+    )
+
+    first_task_index = next(
+        (
+            index
+            for index, message in enumerate(req.messages)
+            if index != latest_input_index and message.get("role") == "user" and _web_message_text(message)
+        ),
+        None,
+    )
+    chosen: dict[int, str] = {}
+    if first_task_index is not None:
+        chosen[first_task_index] = _web_message_section(
+            req.messages[first_task_index],
+            current=False,
+            max_content_chars=_WEB_FIRST_TASK_MAX_CHARS,
+        )
+    recent_tool_index = next(
+        (
+            index
+            for index in range(len(req.messages) - 1, -1, -1)
+            if index not in {first_task_index, latest_input_index}
+            and _has_tool_context(req.messages[index])
+            and _web_message_text(req.messages[index])
+        ),
+        None,
+    )
+    if recent_tool_index is not None:
+        chosen[recent_tool_index] = _web_message_section(
+            req.messages[recent_tool_index],
+            current=False,
+            max_content_chars=_WEB_RECENT_TOOL_MAX_CHARS,
+        )
+    if latest_input_index is not None:
+        chosen[latest_input_index] = _web_message_section(
+            req.messages[latest_input_index],
+            current=True,
+        )
+
+    def assemble(items: dict[int, str]) -> str:
+        return "\n\n".join(
+            [*reduced_fixed, *(items[index] for index in sorted(items) if items[index])]
+        ).strip()
+
+    prompt = assemble(chosen)
+    if len(prompt) > WEB_PROMPT_MAX_CHARS and latest_input_index is not None:
+        without_current = dict(chosen)
+        without_current.pop(latest_input_index, None)
+        base_length = len(assemble(without_current))
+        current_budget = max(1_024, WEB_PROMPT_MAX_CHARS - base_length - 96)
+        chosen[latest_input_index] = _web_message_section(
+            req.messages[latest_input_index],
+            current=True,
+            max_content_chars=current_budget,
+        )
+        prompt = assemble(chosen)
+
+    recent_indices = [
+        index
+        for index in range(len(req.messages) - 1, -1, -1)
+        if index not in chosen and full_message_sections.get(index)
+    ]
+    for index in recent_indices:
+        remaining = WEB_PROMPT_MAX_CHARS - len(prompt) - 96
+        if remaining < 512:
+            break
+        section = _web_message_section(
+            req.messages[index],
+            current=False,
+            max_content_chars=min(_WEB_HISTORY_MESSAGE_MAX_CHARS, remaining),
+        )
+        candidate = dict(chosen)
+        candidate[index] = section
+        candidate_prompt = assemble(candidate)
+        if len(candidate_prompt) > WEB_PROMPT_MAX_CHARS:
             continue
-        if index == latest_input_index:
-            sections.append(f"<aibridge_current_input>\n{text}\n</aibridge_current_input>")
-        else:
-            sections.append(f'<aibridge_message role="{role}">\n{text}\n</aibridge_message>')
-    return "\n\n".join(sections).strip()
+        chosen = candidate
+        prompt = candidate_prompt
+
+    return prompt
 
 
 _WEB_TOOL_TAG = re.compile(

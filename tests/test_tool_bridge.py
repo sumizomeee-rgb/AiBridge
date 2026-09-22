@@ -11,10 +11,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
 
 from aibridge.protocols import (  # noqa: E402
     CanonicalEvent,
+    WEB_PROMPT_MAX_CHARS,
     from_anthropic,
     from_openai,
     flatten_web_prompt,
     parse_web_tool_response,
+    to_anthropic_upstream,
+    to_openai_upstream,
 )
 from aibridge.providers import _bridge_web_tools  # noqa: E402
 
@@ -152,7 +155,7 @@ class ToolBridgeTests(unittest.TestCase):
         self.assertEqual(1, prompt.count("RECENT-TAIL"))
         self.assertNotIn("[中间内容由网关压缩]", prompt)
 
-    def test_large_tool_catalog_does_not_truncate_system_or_current_input(self) -> None:
+    def test_large_tool_catalog_compacts_prompt_but_keeps_critical_edges(self) -> None:
         large_tools = [
             {
                 "name": f"tool_{index}",
@@ -176,11 +179,15 @@ class ToolBridgeTests(unittest.TestCase):
             "default",
         )
         prompt = flatten_web_prompt(req)
-        self.assertIn(system, prompt)
-        self.assertIn(body, prompt)
+        self.assertLessEqual(len(prompt), WEB_PROMPT_MAX_CHARS)
+        self.assertIn("SYSTEM-START", prompt)
+        self.assertIn("SYSTEM-END", prompt)
+        self.assertIn("CURRENT-REAL-TASK", prompt)
+        self.assertIn("OUTPUT-JSON-ONLY", prompt)
         self.assertEqual(1, prompt.count("CURRENT-REAL-TASK"))
         self.assertIn("<aibridge_tool_protocol>", prompt)
-        self.assertNotIn("[中间内容由网关压缩]", prompt)
+        self.assertIn("<aibridge_context_notice>", prompt)
+        self.assertIn("[中间内容由网关为稳定性省略]", prompt)
 
     def test_harupulse_truncation_markers_remain_literal_request_content(self) -> None:
         body = (
@@ -197,7 +204,72 @@ class ToolBridgeTests(unittest.TestCase):
         prompt = flatten_web_prompt(req)
         self.assertIn(body, prompt)
         self.assertEqual(1, prompt.count("revision r1647989"))
-        self.assertNotIn("[中间内容由网关压缩]", prompt)
+        self.assertNotIn("<aibridge_context_notice>", prompt)
+
+    def test_oversized_history_keeps_first_task_recent_tool_result_and_current_input(self) -> None:
+        messages = [{"role": "user", "content": "FIRST-TASK：检查引用并做一个小修改"}]
+        for index in range(8):
+            messages.extend([
+                {"role": "assistant", "content": f"OLD-ANSWER-{index}\n" + ("旧回答 " * 5000)},
+                {"role": "user", "content": f"OLD-QUESTION-{index}\n" + ("旧问题 " * 5000)},
+            ])
+        messages.extend([
+            {"role": "tool", "tool_call_id": "call_recent", "content": "RECENT-TOOL-RESULT\n" + ("引用结果 " * 3000)},
+            {"role": "user", "content": "CURRENT-TASK：根据刚才的引用结果继续"},
+        ])
+        req = from_openai({"model": "web-auto", "messages": messages}, "auto")
+
+        prompt = flatten_web_prompt(req)
+
+        self.assertLessEqual(len(prompt), WEB_PROMPT_MAX_CHARS)
+        self.assertIn("FIRST-TASK", prompt)
+        self.assertIn("RECENT-TOOL-RESULT", prompt)
+        self.assertIn("CURRENT-TASK", prompt)
+        self.assertIn("<aibridge_context_notice>", prompt)
+        self.assertNotIn("OLD-ANSWER-0", prompt)
+
+    def test_web_prompt_marks_images_unavailable_without_copying_payload(self) -> None:
+        req = from_openai(
+            {
+                "model": "web-auto",
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "看看这张图"},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,SECRET_IMAGE"}},
+                    ],
+                }],
+            },
+            "auto",
+        )
+
+        prompt = flatten_web_prompt(req)
+
+        self.assertIn("看看这张图", prompt)
+        self.assertIn('<aibridge_media_unavailable count="1">', prompt)
+        self.assertIn("不得声称已经查看", prompt)
+        self.assertNotIn("SECRET_IMAGE", prompt)
+
+    def test_real_api_payload_still_preserves_images(self) -> None:
+        openai_content = [
+            {"type": "text", "text": "识别图片"},
+            {"type": "image_url", "image_url": {"url": "https://example.test/image.png"}},
+        ]
+        anthropic_content = [
+            {"type": "text", "text": "识别图片"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "IMAGE_DATA"}},
+        ]
+        openai_req = from_openai(
+            {"model": "api-model", "messages": [{"role": "user", "content": openai_content}]},
+            "upstream",
+        )
+        anthropic_req = from_anthropic(
+            {"model": "api-model", "messages": [{"role": "user", "content": anthropic_content}]},
+            "upstream",
+        )
+
+        self.assertEqual(openai_content, to_openai_upstream(openai_req, stream=False)["messages"][0]["content"])
+        self.assertEqual(anthropic_content, to_anthropic_upstream(anthropic_req, stream=False)["messages"][0]["content"])
 
 
 class AsyncToolBridgeTests(unittest.IsolatedAsyncioTestCase):

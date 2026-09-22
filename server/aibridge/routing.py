@@ -380,21 +380,37 @@ class WebRouter:
             candidate = next(item for item in candidates if item["id"] == lease.source_id)
             context.actual_source = candidate
             candidate_req = replace(req, upstream_model=candidate["route_model"]["upstream_name"])
-            emitted = False
+            stream_task: asyncio.Task[list[CanonicalEvent]] | None = None
+            buffered: list[CanonicalEvent] = []
             try:
                 await self._prepare_source(candidate)
-                async for event in self.stream_factory(candidate, candidate_req):
-                    if event.type in {"text", "reasoning", "tool"}:
-                        emitted = True
-                    yield event
-                return
+                async def collect_candidate() -> list[CanonicalEvent]:
+                    return [
+                        event
+                        async for event in self.stream_factory(candidate, candidate_req)
+                        if event.type != "keepalive"
+                    ]
+
+                stream_task = asyncio.create_task(collect_candidate())
+                while not stream_task.done():
+                    done, _ = await asyncio.wait({stream_task}, timeout=self.keepalive_seconds)
+                    if not done:
+                        yield CanonicalEvent("keepalive")
+                buffered = await stream_task
             except Exception as exc:
                 self._record_source_failure(candidate, exc)
-                if emitted:
-                    raise
                 if custom_mode:
                     raise
                 excluded.add(candidate["id"])
                 context.fallback_errors.append(f"{candidate['name']}：{str(exc)[:120]}")
             finally:
+                if stream_task is not None and not stream_task.done():
+                    stream_task.cancel()
+                    await asyncio.gather(stream_task, return_exceptions=True)
                 await lease.release()
+            if buffered:
+                for event in buffered:
+                    yield event
+                return
+            if stream_task is not None and stream_task.done() and stream_task.exception() is None:
+                return

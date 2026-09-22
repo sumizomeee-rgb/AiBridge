@@ -126,6 +126,47 @@ class WebRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(storage.health_updates, [("web-deepseek", "protocol_mismatch", "临时协议异常")])
         self.assertEqual(router.scheduler.snapshot()["active"], {})
 
+    async def test_auto_discards_partial_content_and_falls_back(self) -> None:
+        storage = FakeStorage()
+        calls: list[str] = []
+
+        async def fake_stream(source: dict, request: CanonicalRequest):
+            calls.append(source["id"])
+            if source["id"] == "web-deepseek":
+                yield CanonicalEvent("text", text="不应泄漏的残稿")
+                raise ProviderError("流式连接中断", "upstream_error")
+            yield CanonicalEvent("text", text="完整回答")
+
+        router = WebRouter(storage, SourceScheduler(), fake_stream, keepalive_seconds=0.01)
+        auto = storage.sources[0]
+        request = CanonicalRequest(model="web-auto", upstream_model="auto", messages=[])
+
+        text, _, _ = await collect_events(router.stream(auto, request, RouteContext(auto)))
+
+        self.assertEqual("完整回答", text)
+        self.assertEqual(["web-deepseek", "web-qwen"], calls)
+        self.assertNotIn("不应泄漏的残稿", text)
+        self.assertEqual(storage.health_updates, [("web-deepseek", "upstream_error", "流式连接中断")])
+        self.assertEqual(router.scheduler.snapshot()["active"], {})
+
+    async def test_auto_sends_keepalive_while_buffering_complete_answer(self) -> None:
+        storage = FakeStorage()
+
+        async def fake_stream(source: dict, request: CanonicalRequest):
+            yield CanonicalEvent("text", text="前半段")
+            await asyncio.sleep(0.03)
+            yield CanonicalEvent("text", text="后半段")
+
+        router = WebRouter(storage, SourceScheduler(), fake_stream, keepalive_seconds=0.005)
+        auto = storage.sources[0]
+        request = CanonicalRequest(model="web-auto", upstream_model="auto", messages=[])
+
+        events = [event async for event in router.stream(auto, request, RouteContext(auto))]
+
+        self.assertEqual("keepalive", events[0].type)
+        self.assertEqual("前半段后半段", "".join(event.text for event in events if event.type == "text"))
+        self.assertEqual(router.scheduler.snapshot()["active"], {})
+
     async def test_auto_balanced_dispatch_rotates_real_routes(self) -> None:
         storage = FakeStorage()
         storage.sources[0]["config"]["dispatch_mode"] = "balanced"
