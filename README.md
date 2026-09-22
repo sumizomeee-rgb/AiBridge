@@ -33,7 +33,7 @@ Token 既可放在 `Authorization: Bearer ...`，也可放在 Anthropic 常用�
 
 ## 来源类型
 
-- Web：DeepSeek、千问、豆包、Kimi、Perplexity、文心、LongCat 等。每个来源对外暴露一个可编辑模型名。Cookie/cURL 只加密保存在 `server/data`，不会写入 Git。LongCat 使用已配对的 AiBridge Catcher 在官网页面中实时生成安全签名，调用期间需要保持 `longcat.chat` 页面打开。
+- Web：DeepSeek、千问、豆包、Kimi、Perplexity、文心、LongCat、MiMo 等。每个来源对外暴露一个可编辑模型名。Cookie/cURL 只加密保存在 `server/data`，不会写入 Git。LongCat 使用已配对的 AiBridge Catcher 在官网页面中实时生成安全签名，调用期间需要保持 `longcat.chat` 页面打开；MiMo 同样通过已登录的官网页面中继请求，使用期间需要保持 MiMo 页面打开。
 - 标准 API：支持 OpenAI 兼容和 Anthropic 兼容上游，每个来源可以配置多个模型映射。
 
 首次启动会尝试从本机 CC Switch 的 Claude 配置导入 DeepSeek Anthropic 上游；只读取本机数据库，密钥不会输出到日志。

@@ -322,7 +322,7 @@ def create_admin_app() -> FastAPI:
                 source_id for source_id in requested
                 if isinstance(source_id, str)
                 and source_id in current["allowed_source_ids"]
-                and source_id == "web-longcat"
+                and source_id in {"web-longcat", "web-mimo"}
             }
             if not client or not current["enabled"]:
                 await websocket.close(code=4003, reason="扩展未配对或浏览器同步未开启")

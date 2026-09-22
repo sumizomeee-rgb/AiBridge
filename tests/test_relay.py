@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "server"))
 
@@ -52,9 +53,15 @@ class BrowserRelayTests(unittest.IsolatedAsyncioTestCase):
                 with contextlib.suppress(asyncio.CancelledError, ConnectionError):
                     await task
 
-    async def attach(self, relay: BrowserRelay, client_id: str, websocket: FakeWebSocket) -> asyncio.Task[None]:
+    async def attach(
+        self,
+        relay: BrowserRelay,
+        client_id: str,
+        websocket: FakeWebSocket,
+        source_ids: set[str] | None = None,
+    ) -> asyncio.Task[None]:
         task = asyncio.create_task(
-            relay.attach(client_id, websocket, {"web-longcat"}),
+            relay.attach(client_id, websocket, source_ids or {"web-longcat"}),
             name=f"relay-test-{client_id}-{id(websocket)}",
         )
         await websocket.next_sent("ready")
@@ -77,6 +84,36 @@ class BrowserRelayTests(unittest.IsolatedAsyncioTestCase):
         })
 
         self.assertEqual(await request, {"status": 200, "body": "ok"})
+
+    async def test_same_source_requests_wait_for_previous_result(self) -> None:
+        relay = BrowserRelay()
+        websocket = FakeWebSocket()
+        await self.attach(relay, "client-1", websocket, {"web-mimo"})
+
+        first_request = asyncio.create_task(relay.request("web-mimo", "mimo_chat", {"prompt": "first"}, timeout=1))
+        first_message = await websocket.next_sent("task")
+
+        second_request = asyncio.create_task(relay.request("web-mimo", "mimo_chat", {"prompt": "second"}, timeout=1))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        self.assertTrue(websocket.sent.empty())
+
+        await websocket.reply({
+            "type": "result",
+            "task_id": first_message["task_id"],
+            "ok": True,
+            "response": {"status": 200, "body": "first", "stage": "chat-completion"},
+        })
+        self.assertEqual((await first_request)["body"], "first")
+
+        second_message = await websocket.next_sent("task")
+        await websocket.reply({
+            "type": "result",
+            "task_id": second_message["task_id"],
+            "ok": True,
+            "response": {"status": 200, "body": "second", "stage": "chat-completion"},
+        })
+        self.assertEqual((await second_request)["body"], "second")
 
     async def test_request_reports_offline_without_matching_client(self) -> None:
         relay = BrowserRelay()

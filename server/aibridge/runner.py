@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from logging.handlers import RotatingFileHandler
 
 import uvicorn
@@ -10,6 +11,17 @@ from .settings import settings
 
 
 LOG_FORMAT = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
+SENSITIVE_QUERY_PATTERN = re.compile(r"(xiaomichatbot_ph=)[^&\s\"]+", re.IGNORECASE)
+
+
+class SensitiveQueryFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        redacted = SENSITIVE_QUERY_PATTERN.sub(r"\1[已脱敏]", message)
+        if redacted != message:
+            record.msg = redacted
+            record.args = ()
+        return True
 
 
 def configure_logging() -> None:
@@ -18,6 +30,7 @@ def configure_logging() -> None:
 
     console = logging.StreamHandler()
     console.setFormatter(formatter)
+    console.addFilter(SensitiveQueryFilter())
 
     log_file = RotatingFileHandler(
         settings.log_path,
@@ -26,6 +39,7 @@ def configure_logging() -> None:
         encoding="utf-8",
     )
     log_file.setFormatter(formatter)
+    log_file.addFilter(SensitiveQueryFilter())
 
     root = logging.getLogger()
     root.handlers.clear()

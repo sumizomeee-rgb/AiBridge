@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import json
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 
 MAX_CAPTURE_BYTES = 4 * 1024 * 1024
@@ -56,6 +56,13 @@ CAPTURE_RULES: dict[str, dict[str, Any]] = {
         "hosts": {"longcat.chat"},
         "path_contains": "/api/v1/chat-completion-V2",
         "origins": ["https://longcat.chat/*"],
+        "grade": "experimental",
+    },
+    "web-mimo": {
+        "name": "MiMo Web",
+        "hosts": {"aistudio.xiaomimimo.com"},
+        "path_contains": "/open-apis/bot/chat",
+        "origins": ["https://aistudio.xiaomimimo.com/*"],
         "grade": "experimental",
     },
 }
@@ -187,6 +194,21 @@ def build_capture_credential(payload: dict[str, Any]) -> tuple[str, dict[str, An
             if name.lower() not in {"mtgsig", "m-traceid"}
         }
         body, body_base64 = "", ""
+    elif source_id == "web-mimo":
+        parts = urlsplit(request_url)
+        ph = (parse_qs(parts.query).get("xiaomichatbot_ph") or [""])[0].strip()
+        if not ph or len(ph) > 256:
+            raise ValueError("MiMo 捕获请求缺少 xiaomichatbot_ph")
+        request_url = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode({"xiaomichatbot_ph": ph}), ""))
+        headers = {
+            name: value for name, value in headers.items()
+            if name.lower() in {
+                "accept", "accept-language", "content-type", "origin", "referer",
+                "user-agent", "x-timezone",
+            } or name.lower().startswith(("sec-ch-", "sec-fetch-"))
+        }
+        cookie = ""
+        body, body_base64 = "", ""
     credential: dict[str, Any] = {
         "request_url": request_url,
         "headers": headers,
@@ -196,6 +218,8 @@ def build_capture_credential(payload: dict[str, Any]) -> tuple[str, dict[str, An
     if body_base64:
         credential["body_base64"] = body_base64
     if source_id == "web-longcat":
+        credential["browser_relay"] = True
+    elif source_id == "web-mimo":
         credential["browser_relay"] = True
 
     page_storage = payload.get("page_storage")

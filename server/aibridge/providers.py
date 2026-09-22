@@ -13,7 +13,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, AsyncIterator
-from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import httpx
 
@@ -331,6 +331,128 @@ async def _stream_longcat(source: dict[str, Any], req: CanonicalRequest) -> Asyn
             diagnostic,
         )
         raise ProviderError(f"LongCat 响应中没有可识别的文本（{diagnostic}）", "protocol_mismatch")
+    for event in events:
+        yield event
+
+
+def _mimo_content_events(content: str) -> list[CanonicalEvent]:
+    content = content.replace("\x00", "")
+    events: list[CanonicalEvent] = []
+    cursor = 0
+    while cursor < len(content):
+        start = content.find("<think>", cursor)
+        if start < 0:
+            text = content[cursor:]
+            if text:
+                events.append(CanonicalEvent("text", text=text))
+            break
+        if start > cursor:
+            events.append(CanonicalEvent("text", text=content[cursor:start]))
+        end = content.find("</think>", start + len("<think>"))
+        if end < 0:
+            reasoning = content[start + len("<think>"):]
+            if reasoning:
+                events.append(CanonicalEvent("reasoning", reasoning=reasoning))
+            break
+        reasoning = content[start + len("<think>"):end]
+        if reasoning:
+            events.append(CanonicalEvent("reasoning", reasoning=reasoning))
+        cursor = end + len("</think>")
+    return events
+
+
+def _parse_mimo_stream(raw: str) -> list[CanonicalEvent]:
+    event_name = ""
+    content_parts: list[str] = []
+    usage: dict[str, int] | None = None
+    for line in raw.splitlines():
+        if line.startswith("event:"):
+            event_name = line[6:].strip()
+            continue
+        if not line.startswith("data:"):
+            if not line.strip():
+                event_name = ""
+            continue
+        try:
+            data = json.loads(line[5:].strip())
+        except json.JSONDecodeError:
+            continue
+        if event_name == "message" and isinstance(data, dict):
+            content = data.get("content")
+            if data.get("type") == "text" and isinstance(content, str):
+                content_parts.append(content)
+        elif event_name == "usage" and isinstance(data, dict):
+            usage = {
+                "prompt_tokens": int(data.get("promptTokens") or 0),
+                "completion_tokens": int(data.get("completionTokens") or 0),
+                "total_tokens": int(data.get("totalTokens") or 0),
+            }
+    events = _mimo_content_events("".join(content_parts))
+    if usage:
+        events.append(CanonicalEvent("usage", usage=usage))
+    return events
+
+
+def _mimo_stream_diagnostic(raw: str) -> str:
+    event_types: list[str] = []
+    data_lines = 0
+    malformed = 0
+    current_event = ""
+    for line in raw.splitlines():
+        if line.startswith("event:"):
+            current_event = line[6:].strip()
+            if current_event and current_event not in event_types:
+                event_types.append(current_event)
+        elif line.startswith("data:"):
+            data_lines += 1
+            try:
+                json.loads(line[5:].strip())
+            except json.JSONDecodeError:
+                malformed += 1
+        elif not line.strip():
+            current_event = ""
+    details = [f"响应 {len(raw.encode('utf-8'))} 字节", f"SSE 数据 {data_lines} 条"]
+    if event_types:
+        details.append(f"事件类型 {','.join(event_types[:8])}")
+    if malformed:
+        details.append(f"无法解析 {malformed} 条")
+    return "；".join(details)
+
+
+async def _stream_mimo(source: dict[str, Any], req: CanonicalRequest) -> AsyncIterator[CanonicalEvent]:
+    captured_url, captured_headers = _web_headers(source)
+    parts = urlsplit(captured_url)
+    ph = (parse_qs(parts.query).get("xiaomichatbot_ph") or [""])[0].strip()
+    if parts.scheme != "https" or parts.hostname != "aistudio.xiaomimimo.com" or parts.path != "/open-apis/bot/chat" or not ph:
+        raise ProviderError("MiMo Web 需要由 AiBridge Catcher 捕获有效的官网对话请求", "invalid_config", 400)
+
+    relay_headers = {
+        str(name): str(value) for name, value in captured_headers.items()
+        if str(name).lower() in {"accept-language", "x-timezone"}
+        and str(value) not in {"", "undefined", "null"}
+    }
+    try:
+        response = await relay_broker.request(
+            "web-mimo",
+            "mimo_chat",
+            {
+                "prompt": flatten_web_prompt(req),
+                "model": req.upstream_model or "mimo-v2.6-flash",
+                "login_identifier": ph,
+                "headers": relay_headers,
+            },
+        )
+    except RelayError as exc:
+        raise ProviderError(str(exc), "browser_relay_unavailable", 503) from exc
+    status = int(response.get("status") or 0)
+    raw = str(response.get("body") or "")
+    if status >= 400:
+        raise classify_http(status)
+    events = _parse_mimo_stream(raw)
+    if not any(event.type in {"text", "reasoning", "tool"} for event in events):
+        diagnostic = _mimo_stream_diagnostic(raw)
+        logger.warning("MiMo 响应无法解析：HTTP=%s，%s", status, diagnostic)
+        raise ProviderError(f"MiMo 响应中没有可识别的文本（{diagnostic}）", "protocol_mismatch")
     for event in events:
         yield event
 
@@ -1139,6 +1261,9 @@ def stream_source(source: dict[str, Any], req: CanonicalRequest) -> AsyncIterato
         dialect = "standard"
     elif protocol == "longcat_web":
         events = _stream_longcat(source, req)
+        dialect = "standard"
+    elif protocol == "mimo_web":
+        events = _stream_mimo(source, req)
         dialect = "standard"
     else:
         raise ProviderError("该 Web 来源尚未实现直连适配器", "unsupported", 400)

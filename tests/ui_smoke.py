@@ -29,7 +29,7 @@ def main() -> None:
         assert page.locator(".source-row").count() >= 7
         assert page.locator(".source-switch").count() == page.locator(".source-row").count()
         assert page.get_by_role("heading", name="浏览器同步", exact=True).is_visible()
-        assert page.locator("[data-catcher-source]").count() == 7
+        assert page.locator("[data-catcher-source]").count() == 8
         catcher_switch = page.locator("#catcher-toggle")
         catcher_initial = catcher_switch.get_attribute("aria-checked")
         catcher_toggled = "false" if catcher_initial == "true" else "true"
@@ -126,6 +126,16 @@ def main() -> None:
         longcat_icon = page.request.get("http://127.0.0.1:7009/assets/providers/longcat.svg")
         assert longcat_icon.ok
         assert longcat_icon.text().startswith("<svg")
+        mimo = page.locator('.source-row[data-source="web-mimo"]')
+        assert mimo.count() == 1
+        assert mimo.locator('img[src="/assets/providers/mimo.svg"]').count() == 1
+        assert mimo.locator(".model-tag").inner_text() == "mimo-web"
+        mimo_icon = page.request.get("http://127.0.0.1:7009/assets/providers/mimo.svg")
+        assert mimo_icon.ok
+        mimo_svg = mimo_icon.text()
+        assert mimo_svg.startswith("<svg")
+        assert "Xiaomi MiMo Studio 官网 favicon" in mimo_svg
+        assert "<rect" in mimo_svg and "<path" in mimo_svg
         deepseek.get_by_role("button", name="配置来源").click()
         assert "deepseek-flash = deepseek-flash" in page.locator("#source-models").input_value()
         assert "claude-sonnet-4-5-20250929" not in page.locator("#source-models").input_value()

@@ -47,6 +47,7 @@ const providerMarks = {
   "web-perplexity": `<img src="/assets/providers/perplexity.svg" alt="">`,
   "web-wenxin": `<img src="https://psstatic.cdn.bcebos.com/aife/image/baidu_ai_logo_1736910930000.png" alt="">`,
   "web-longcat": `<img src="/assets/providers/longcat.svg" alt="">`,
+  "web-mimo": `<img src="/assets/providers/mimo.svg" alt="">`,
 };
 
 function apiProviderMark(source, fallback) {

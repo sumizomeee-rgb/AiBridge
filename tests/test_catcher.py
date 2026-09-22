@@ -98,6 +98,42 @@ class CatcherCaptureTests(unittest.TestCase):
         self.assertNotIn("mtgsig", normalized)
         self.assertEqual(credential["body"], "")
 
+    def test_mimo_capture_keeps_only_required_url_and_safe_headers(self) -> None:
+        source_id, credential = build_capture_credential({
+            "source_id": "web-mimo",
+            "url": "https://aistudio.xiaomimimo.com/open-apis/bot/chat?xiaomichatbot_ph=test-ph&discard=1",
+            "method": "POST",
+            "headers": {
+                "Accept": "text/event-stream",
+                "Content-Type": "application/json",
+                "Origin": "https://aistudio.xiaomimimo.com",
+                "X-Timezone": "Asia/Shanghai",
+                "Traceparent": "ephemeral-trace",
+                "Authorization": "must-not-save",
+                "Cookie": "must-not-save",
+            },
+            "body": {"text": '{"query":"旧问题"}'},
+        })
+        self.assertEqual(source_id, "web-mimo")
+        self.assertEqual(
+            credential["request_url"],
+            "https://aistudio.xiaomimimo.com/open-apis/bot/chat?xiaomichatbot_ph=test-ph",
+        )
+        self.assertEqual(credential["body"], "")
+        self.assertEqual(credential["cookie"], "")
+        self.assertTrue(credential["browser_relay"])
+        self.assertNotIn("Authorization", credential["headers"])
+        self.assertNotIn("Traceparent", credential["headers"])
+        self.assertEqual(credential["headers"]["X-Timezone"], "Asia/Shanghai")
+
+    def test_mimo_capture_requires_login_identifier(self) -> None:
+        with self.assertRaisesRegex(ValueError, "xiaomichatbot_ph"):
+            build_capture_credential({
+                "source_id": "web-mimo",
+                "url": "https://aistudio.xiaomimimo.com/open-apis/bot/chat",
+                "method": "POST",
+            })
+
     def test_capture_rejects_wrong_host(self) -> None:
         with self.assertRaisesRegex(ValueError, "域名"):
             build_capture_credential({
@@ -139,6 +175,29 @@ class CatcherStorageTests(unittest.TestCase):
             )
             reopened = Storage(database, secret)
             self.assertNotIn("web-longcat", reopened.catcher_state()["allowed_source_ids"])
+
+    def test_existing_install_adds_mimo_once_without_overriding_later_choice(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "aibridge.db"
+            secret = root / "secret.key"
+            Storage(database, secret)
+            db = sqlite3.connect(database)
+            try:
+                row = db.execute("SELECT allowed_sources_json FROM catcher_settings WHERE id=1").fetchone()
+                allowed = [item for item in json.loads(row[0]) if item != "web-mimo"]
+                db.execute("UPDATE catcher_settings SET allowed_sources_json=? WHERE id=1", (json.dumps(allowed),))
+                db.execute("DELETE FROM app_migrations WHERE name='catcher-allow-web-mimo-v1'")
+                db.commit()
+            finally:
+                db.close()
+
+            migrated = Storage(database, secret)
+            self.assertIn("web-mimo", migrated.catcher_state()["allowed_source_ids"])
+
+            migrated.update_catcher_settings(enabled=True, auto_enable=True, allowed_source_ids=allowed)
+            reopened = Storage(database, secret)
+            self.assertNotIn("web-mimo", reopened.catcher_state()["allowed_source_ids"])
 
     def test_pairing_is_single_use_and_client_token_can_be_verified(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

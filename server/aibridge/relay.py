@@ -26,6 +26,7 @@ class BrowserRelay:
     def __init__(self) -> None:
         self._clients: dict[str, RelayClient] = {}
         self._pending: dict[str, tuple[asyncio.Future[dict[str, Any]], RelayClient]] = {}
+        self._source_locks: dict[str, asyncio.Lock] = {}
         self._lock = asyncio.Lock()
         self._cursor = 0
 
@@ -79,9 +80,22 @@ class BrowserRelay:
 
     async def request(self, source_id: str, action: str, payload: dict[str, Any], timeout: float = 190) -> dict[str, Any]:
         async with self._lock:
+            source_lock = self._source_locks.setdefault(source_id, asyncio.Lock())
+
+        async with source_lock:
+            return await self._request_serialized(source_id, action, payload, timeout)
+
+    async def _request_serialized(
+        self,
+        source_id: str,
+        action: str,
+        payload: dict[str, Any],
+        timeout: float,
+    ) -> dict[str, Any]:
+        async with self._lock:
             candidates = [client for client in self._clients.values() if source_id in client.source_ids]
             if not candidates:
-                raise RelayError("浏览器中继离线；请打开已配对的 Catcher 和 longcat.chat 页面")
+                raise RelayError("浏览器中继离线；请打开已配对的 Catcher 和对应官网页面")
             client = candidates[self._cursor % len(candidates)]
             self._cursor += 1
 
