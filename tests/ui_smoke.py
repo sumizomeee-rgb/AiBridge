@@ -20,6 +20,15 @@ def main() -> None:
         assert page.get_by_text("一个地址，接入所有模型。").count() == 0
         assert page.locator(".source-row").count() >= 7
         assert page.locator(".source-switch").count() == page.locator(".source-row").count()
+        assert page.get_by_role("heading", name="浏览器同步", exact=True).is_visible()
+        assert page.locator("[data-catcher-source]").count() == 6
+        catcher_switch = page.locator("#catcher-toggle")
+        catcher_initial = catcher_switch.get_attribute("aria-checked")
+        catcher_toggled = "false" if catcher_initial == "true" else "true"
+        catcher_switch.click()
+        page.wait_for_function(f"document.querySelector('#catcher-toggle')?.getAttribute('aria-checked') === '{catcher_toggled}'")
+        page.locator("#catcher-toggle").click()
+        page.wait_for_function(f"document.querySelector('#catcher-toggle')?.getAttribute('aria-checked') === '{catcher_initial}'")
         assert page.locator(".source-row .provider-icon img").count() >= 6
         assert page.locator(".source-row").first.get_attribute("data-source") == "web-auto"
         auto = page.locator('.source-row[data-source="web-auto"]')
@@ -57,7 +66,23 @@ def main() -> None:
         assert page.locator("#web-public-name").is_visible()
         assert page.locator("#web-max-concurrency").input_value() == "3"
         assert not page.locator("#source-protocol").is_visible()
-        page.locator("[data-close]").first.click()
+        save_calls: list[str] = []
+
+        def mock_qwen_save(route) -> None:
+            save_calls.append("save")
+            route.fulfill(status=200, content_type="application/json", body='{"ok":true}')
+
+        def mock_qwen_health(route) -> None:
+            save_calls.append("health")
+            route.fulfill(status=200, content_type="application/json", body='{"status":"healthy","message":"可用，测试回复：OK"}')
+
+        page.route("**/api/sources/web-qwen", mock_qwen_save)
+        page.route("**/api/sources/web-qwen/health", mock_qwen_health)
+        page.get_by_role("button", name="保存并检查").click()
+        page.wait_for_function("document.querySelector('#toast')?.textContent.includes('可用，测试回复：OK')")
+        assert save_calls == ["save", "health"], save_calls
+        page.unroute("**/api/sources/web-qwen", mock_qwen_save)
+        page.unroute("**/api/sources/web-qwen/health", mock_qwen_health)
         doubao = page.locator('.source-row[data-source="web-doubao"]')
         doubao.get_by_role("button", name="配置来源").click()
         assert "过滤 completion" in page.locator("#web-guide").inner_text()
@@ -76,6 +101,7 @@ def main() -> None:
         page.locator("[data-close]").first.click()
         wenxin = page.locator('.source-row[data-source="web-wenxin"]')
         assert "baidu_ai_logo" in (wenxin.locator(".provider-icon img").get_attribute("src") or "")
+        assert wenxin.locator(".model-tag").inner_text() == "wenxin-web"
         wenxin.get_by_role("button", name="配置来源").click()
         assert "过滤 /aichat/api/conversation" in page.locator("#web-guide").inner_text()
         assert "chat_token" in page.locator("#source-curl").get_attribute("placeholder")

@@ -9,9 +9,11 @@ from typing import Any, AsyncIterator, Callable
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from .catcher import CAPTURE_RULES, build_capture_credential, public_capture_rules
 from .protocols import (
     anthropic_response,
     anthropic_sse,
@@ -22,7 +24,7 @@ from .protocols import (
     openai_sse,
     sse,
 )
-from .providers import ProviderError, _api_headers, endpoint, health_check, parse_curl
+from .providers import ProviderError, _api_headers, endpoint, health_check, parse_curl, refresh_kimi_credential
 from .routing import AUTO_SOURCE_ID, RouteContext, SourceScheduler, WebRouter, source_concurrency
 from .settings import STATIC_DIR, settings
 from .storage import Storage
@@ -209,16 +211,151 @@ def create_gateway_app() -> FastAPI:
 
 def create_admin_app() -> FastAPI:
     app = FastAPI(title="AiBridge Admin", version="2.0.0", docs_url=None, redoc_url=None)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=r"chrome-extension://[a-p]{32}",
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Authorization", "Content-Type"],
+        max_age=600,
+    )
+
+    def catcher_client(request: Request) -> dict[str, Any]:
+        client = storage.verify_catcher_client(_token(request))
+        if not client:
+            raise HTTPException(401, "扩展尚未配对或配对已撤销")
+        return client
 
     @app.get("/api/state")
     async def state(request: Request):
         lan = _lan_ip()
         sources = web_router.runtime_sources(storage.list_sources())
+        catcher = storage.catcher_state()
+        catcher["rules"] = public_capture_rules()
         return {
             "gateway": {"local_url": f"http://127.0.0.1:{settings.gateway_port}", "lan_url": f"http://{lan}:{settings.gateway_port}", "admin_url": f"http://127.0.0.1:{settings.admin_port}"},
             "permissions": {"source_toggle": _loopback_client(request.client.host if request.client else None)},
-            "sources": sources, "keys": storage.list_keys(), "logs": storage.list_logs(),
+            "sources": sources, "keys": storage.list_keys(), "logs": storage.list_logs(), "catcher": catcher,
         }
+
+    @app.patch("/api/catcher/settings")
+    async def catcher_settings(request: Request):
+        if not _loopback_client(request.client.host if request.client else None):
+            raise HTTPException(403, "浏览器同步仅允许在本机管理")
+        body = await request.json()
+        if type(body.get("enabled")) is not bool or type(body.get("auto_enable")) is not bool:
+            raise HTTPException(400, "enabled 与 auto_enable 必须是布尔值")
+        requested = body.get("allowed_source_ids")
+        if not isinstance(requested, list):
+            raise HTTPException(400, "allowed_source_ids 必须是数组")
+        allowed = list(dict.fromkeys(
+            source_id for source_id in requested
+            if isinstance(source_id, str) and source_id in CAPTURE_RULES
+        ))
+        storage.update_catcher_settings(
+            enabled=body["enabled"],
+            auto_enable=body["auto_enable"],
+            allowed_source_ids=allowed,
+        )
+        return {"ok": True}
+
+    @app.post("/api/catcher/pairing")
+    async def catcher_pairing(request: Request):
+        if not _loopback_client(request.client.host if request.client else None):
+            raise HTTPException(403, "配对码仅允许在本机生成")
+        current = storage.catcher_state()
+        if not current["enabled"]:
+            raise HTTPException(409, "请先开启浏览器同步")
+        code, expires_at = storage.create_catcher_pairing()
+        return {"code": code, "expires_at": expires_at, "notice": "配对码十分钟内有效，使用一次后立即失效。"}
+
+    @app.delete("/api/catcher/clients/{client_id}")
+    async def revoke_catcher_client(client_id: str, request: Request):
+        if not _loopback_client(request.client.host if request.client else None):
+            raise HTTPException(403, "扩展配对仅允许在本机管理")
+        storage.revoke_catcher_client(client_id)
+        return {"ok": True}
+
+    @app.post("/api/catcher/v1/pair")
+    async def pair_catcher_extension(request: Request):
+        body = await request.json()
+        paired = storage.consume_catcher_pairing(str(body.get("code") or ""), str(body.get("name") or "Chrome 扩展"))
+        if not paired:
+            raise HTTPException(401, "配对码无效、已过期或浏览器同步未开启")
+        client, token = paired
+        current = storage.catcher_state()
+        return {
+            "client": client,
+            "token": token,
+            "protocol_version": 1,
+            "enabled": current["enabled"],
+            "allowed_source_ids": current["allowed_source_ids"],
+            "rules": public_capture_rules(),
+        }
+
+    @app.get("/api/catcher/v1/status")
+    async def catcher_extension_status(request: Request):
+        client = catcher_client(request)
+        current = storage.catcher_state()
+        storage.touch_catcher_client(client["id"])
+        return {
+            "protocol_version": 1,
+            "enabled": current["enabled"],
+            "allowed_source_ids": current["allowed_source_ids"],
+            "rules": public_capture_rules(),
+        }
+
+    @app.post("/api/catcher/v1/captures")
+    async def receive_catcher_capture(request: Request):
+        content_length = int(request.headers.get("content-length") or 0)
+        if content_length > 5 * 1024 * 1024:
+            raise HTTPException(413, "捕获内容过大")
+        client = catcher_client(request)
+        current = storage.catcher_state()
+        if not current["enabled"]:
+            raise HTTPException(503, "浏览器同步当前已关闭")
+        body = await request.json()
+        try:
+            source_id, credential = build_capture_credential(body)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if source_id not in current["allowed_source_ids"]:
+            raise HTTPException(403, "该来源未开启自动同步")
+        source = storage.get_source(source_id, include_secret=True)
+        if not source:
+            raise HTTPException(404, "对应 Web 来源不存在")
+
+        merged_credential = source.get("credential", {}) | {
+            key: value for key, value in credential.items() if value not in (None, "", {})
+        }
+        candidate = source | {"credential": merged_credential}
+        models = next((item["models"] for item in storage.list_sources() if item["id"] == source_id), [])
+        upstream_model = models[0]["upstream_name"] if models else "default"
+        status, message = await health_check(candidate, upstream_model)
+        storage.touch_catcher_client(client["id"])
+        if status != "healthy":
+            storage.add_catcher_event(source_id, client["id"], status, message)
+            raise HTTPException(422, f"已捕获但健康检查未通过：{message}")
+
+        config = source.get("config", {}) | {
+            "captured_by": "AiBridge Catcher",
+            "capture_protocol_version": 1,
+        }
+        storage.save_source(
+            {
+                "name": source["name"],
+                "kind": source["kind"],
+                "protocol": source["protocol"],
+                "base_url": source["base_url"],
+                "enabled": True if current["auto_enable"] else source["enabled"],
+                "config": config,
+                "credential": merged_credential,
+            },
+            source_id,
+        )
+        storage.update_health(source_id, status, f"浏览器自动同步成功 · {message}")
+        storage.add_catcher_event(source_id, client["id"], "healthy", message)
+        return {"ok": True, "source_id": source_id, "status": status, "message": message}
 
     @app.post("/api/keys")
     async def create_key(request: Request):
@@ -306,6 +443,8 @@ def create_admin_app() -> FastAPI:
             for candidate in candidates:
                 lease = await source_scheduler.acquire(candidate["id"], source_concurrency(candidate))
                 try:
+                    if await refresh_kimi_credential(candidate):
+                        storage.update_source_credential(candidate["id"], candidate["credential"])
                     status, message = await health_check(candidate, candidate["route_model"]["upstream_name"])
                 finally:
                     await lease.release()
@@ -320,6 +459,8 @@ def create_admin_app() -> FastAPI:
         if source.get("kind") == "web":
             lease = await source_scheduler.acquire(source["id"], source_concurrency(source))
         try:
+            if await refresh_kimi_credential(source):
+                storage.update_source_credential(source["id"], source["credential"])
             status, message = await health_check(source, upstream)
         finally:
             if lease:

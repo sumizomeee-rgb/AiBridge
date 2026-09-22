@@ -6,7 +6,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, AsyncIterator, Callable
 
 from .protocols import CanonicalEvent, CanonicalRequest
-from .providers import ProviderError, stream_source
+from .providers import ProviderError, refresh_kimi_credential, stream_source
 from .storage import Storage
 
 
@@ -168,6 +168,10 @@ class WebRouter:
         message = str(exc).strip() or type(exc).__name__
         self.storage.update_health(source["id"], status, message)
 
+    async def _prepare_source(self, source: dict[str, Any]) -> None:
+        if self.stream_factory is stream_source and await refresh_kimi_credential(source):
+            self.storage.update_source_credential(source["id"], source["credential"])
+
     @staticmethod
     def _routing_policy(sources: dict[str, dict[str, Any]]) -> tuple[str, list[str], str]:
         config = (sources.get(AUTO_SOURCE_ID) or {}).get("config") or {}
@@ -312,6 +316,7 @@ class WebRouter:
                 raise ProviderError("来源并发调度失败", "scheduler_error", 500)
             context.actual_source = source
             try:
+                await self._prepare_source(source)
                 async for event in self.stream_factory(source, req):
                     yield event
             except Exception as exc:
@@ -346,6 +351,7 @@ class WebRouter:
             candidate_req = replace(req, upstream_model=candidate["route_model"]["upstream_name"])
             emitted = False
             try:
+                await self._prepare_source(candidate)
                 async for event in self.stream_factory(candidate, candidate_req):
                     if event.type in {"text", "reasoning", "tool"}:
                         emitted = True

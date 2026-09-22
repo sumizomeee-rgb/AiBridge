@@ -1,5 +1,5 @@
 const $ = (selector) => document.querySelector(selector);
-let state = { sources: [], keys: [], logs: [], gateway: {}, permissions: {} };
+let state = { sources: [], keys: [], logs: [], gateway: {}, permissions: {}, catcher: {} };
 
 const statusLabels = {
   healthy: "可用", unchecked: "待检测", unconfigured: "未配置", unsupported: "未接入",
@@ -101,6 +101,52 @@ function renderKeys() {
   $("#keys").innerHTML = state.keys.length ? state.keys.map((key) => `<div class="list-row"><div><strong>${escapeHtml(key.name)}</strong><br><code>${escapeHtml(key.prefix)}••••••••</code></div><small>${key.last_used_at ? `最后使用 ${escapeHtml(formatTime(key.last_used_at))}` : "尚未使用"}</small><button class="icon-action danger" data-key-delete="${escapeHtml(key.id)}" data-tooltip="删除 Token" aria-label="删除 Token">${icons.trash}</button></div>`).join("") : `<div class="empty">尚未生成网关 Token</div>`;
 }
 
+function renderCatcher() {
+  const catcher = state.catcher || {};
+  const enabled = Boolean(catcher.enabled);
+  const block = $("#catcher");
+  block.classList.toggle("off", !enabled);
+  $("#catcher-state").textContent = enabled ? "已开启" : "未开启";
+  const toggle = $("#catcher-toggle");
+  toggle.classList.toggle("active", enabled);
+  toggle.setAttribute("aria-checked", String(enabled));
+  $("#catcher-auto-enable").checked = Boolean(catcher.auto_enable);
+
+  const allowed = new Set(catcher.allowed_source_ids || []);
+  const gradeLabels = { stable: "稳定", beta: "测试", experimental: "实验" };
+  $("#catcher-sources").innerHTML = (catcher.rules || []).map((rule) => `<label class="catcher-source"><input type="checkbox" data-catcher-source="${escapeHtml(rule.source_id)}" ${allowed.has(rule.source_id) ? "checked" : ""}><span>${escapeHtml(rule.name)}</span><em class="source-grade">${escapeHtml(gradeLabels[rule.grade] || rule.grade)}</em></label>`).join("");
+
+  const clients = catcher.clients || [];
+  $("#catcher-client-summary").textContent = clients.length ? `${clients.length} 个扩展已配对` : "尚无扩展连接";
+  $("#catcher-clients").innerHTML = clients.map((client) => `<div class="catcher-client"><div><strong>${escapeHtml(client.name)}</strong><small>${escapeHtml(client.token_prefix)}•• · ${client.last_seen_at ? `最后连接 ${escapeHtml(formatTime(client.last_seen_at))}` : "尚未连接"}</small></div><button data-catcher-revoke="${escapeHtml(client.id)}">撤销</button></div>`).join("");
+
+  const last = (catcher.events || [])[0];
+  const eventNode = $("#catcher-last-event");
+  if (last) {
+    const source = state.sources.find((item) => item.id === last.source_id);
+    eventNode.textContent = `${formatTime(last.created_at)} · ${source?.name || last.source_id} · ${last.message}`;
+    eventNode.className = `catcher-last-event ${last.status === "healthy" ? "ok" : "fail"}`;
+  } else {
+    eventNode.textContent = "等待浏览器捕获";
+    eventNode.className = "catcher-last-event";
+  }
+  if (!catcher.pairing_active) $("#catcher-pairing").hidden = true;
+}
+
+function catcherSettingsFromUi(overrides = {}) {
+  return {
+    enabled: state.catcher?.enabled || false,
+    auto_enable: $("#catcher-auto-enable").checked,
+    allowed_source_ids: [...document.querySelectorAll("[data-catcher-source]:checked")].map((node) => node.dataset.catcherSource),
+    ...overrides,
+  };
+}
+
+async function saveCatcherSettings(overrides = {}) {
+  await api("/api/catcher/settings", { method: "PATCH", body: JSON.stringify(catcherSettingsFromUi(overrides)) });
+  await load();
+}
+
 function formatTime(value) {
   if (!value) return "—";
   return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date(value));
@@ -113,7 +159,7 @@ function renderLogs() {
 async function load() {
   state = await api("/api/state");
   $("#lan-url").textContent = state.gateway.lan_url;
-  renderSources(); renderKeys(); renderLogs();
+  renderSources(); renderCatcher(); renderKeys(); renderLogs();
 }
 
 function setLogsCollapsed(collapsed, remember = true) {
@@ -230,6 +276,8 @@ function parseModels(text, existing = []) {
 
 $("#source-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  const submitButton = event.submitter || event.currentTarget.querySelector('button[type="submit"]');
+  const submitLabel = submitButton.textContent;
   const id = $("#source-id").value;
   const kind = $("#source-kind").value;
   const old = state.sources.find((x) => x.id === id);
@@ -273,12 +321,31 @@ $("#source-form").addEventListener("submit", async (event) => {
     const key = $("#source-api-key").value.trim();
     if (key) body.credential = { api_key: key };
   }
+  submitButton.disabled = true;
+  submitButton.textContent = "保存并检查…";
+  let saved;
   try {
-    await api(id ? `/api/sources/${id}` : "/api/sources", { method: id ? "PUT" : "POST", body: JSON.stringify(body) });
+    saved = await api(id ? `/api/sources/${id}` : "/api/sources", { method: id ? "PUT" : "POST", body: JSON.stringify(body) });
     $("#source-dialog").close();
-    toast("来源配置已保存");
-    await load();
-  } catch (error) { toast(error.message, true); }
+    toast("配置已保存，正在检查连接…");
+  } catch (error) {
+    toast(error.message, true);
+    submitButton.disabled = false;
+    submitButton.textContent = submitLabel;
+    return;
+  }
+
+  const savedId = id || saved.id;
+  try {
+    const result = await api(`/api/sources/${savedId}/health`, { method: "POST", body: "{}" });
+    toast(`${body.name}：${result.message}`, result.status !== "healthy");
+  } catch (error) {
+    toast(`配置已保存，但健康检查失败：${error.message}`, true);
+  } finally {
+    submitButton.disabled = false;
+    submitButton.textContent = submitLabel;
+    await load().catch((error) => toast(`状态刷新失败：${error.message}`, true));
+  }
 });
 
 document.querySelectorAll('input[name="auto-routing-mode"]').forEach((input) => input.addEventListener("change", syncAutoRoutingFields));
@@ -311,6 +378,13 @@ document.addEventListener("click", async (event) => {
   if (keyDelete) {
     if (!confirm("确定删除这个 Token？使用它的客户端会立即失效。")) return;
     await api(`/api/keys/${keyDelete.dataset.keyDelete}`, { method: "DELETE" });
+    return load();
+  }
+  const catcherRevoke = event.target.closest("[data-catcher-revoke]");
+  if (catcherRevoke) {
+    if (!confirm("撤销后，该扩展必须重新配对才能同步。确定继续？")) return;
+    await api(`/api/catcher/clients/${catcherRevoke.dataset.catcherRevoke}`, { method: "DELETE" });
+    toast("扩展配对已撤销");
     return load();
   }
   const sourceEnable = event.target.closest("[data-source-enable]");
@@ -353,6 +427,34 @@ document.addEventListener("click", async (event) => {
 });
 
 $("#add-api").addEventListener("click", () => openSource());
+$("#catcher-toggle").addEventListener("click", async () => {
+  try {
+    await saveCatcherSettings({ enabled: !state.catcher?.enabled });
+    toast(`浏览器同步已${state.catcher?.enabled ? "开启" : "关闭"}`);
+  } catch (error) { toast(error.message, true); }
+});
+$("#catcher-pair").addEventListener("click", async () => {
+  try {
+    const result = await api("/api/catcher/pairing", { method: "POST", body: "{}" });
+    $("#catcher-pairing-code").textContent = result.code;
+    $("#catcher-pairing").hidden = false;
+    toast("配对码已生成，十分钟内有效");
+    await load();
+  } catch (error) { toast(error.message, true); }
+});
+$("#catcher-auto-enable").addEventListener("change", async () => {
+  try {
+    await saveCatcherSettings();
+    toast("自动启用策略已保存");
+  } catch (error) { toast(error.message, true); }
+});
+$("#catcher-sources").addEventListener("change", async (event) => {
+  if (!event.target.matches("[data-catcher-source]")) return;
+  try {
+    await saveCatcherSettings();
+    toast("同步范围已更新");
+  } catch (error) { toast(error.message, true); }
+});
 $("#refresh").addEventListener("click", () => load().then(() => toast("状态已刷新")).catch((error) => toast(error.message, true)));
 $("#logs-toggle").addEventListener("click", () => setLogsCollapsed(!$("#logs-content").classList.contains("collapsed")));
 $("#create-key").addEventListener("click", async () => {

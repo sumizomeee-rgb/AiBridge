@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
 import threading
 import uuid
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -91,7 +92,45 @@ class Storage:
                     error TEXT,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS catcher_settings (
+                    id INTEGER PRIMARY KEY CHECK(id=1),
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    auto_enable INTEGER NOT NULL DEFAULT 0,
+                    allowed_sources_json TEXT NOT NULL DEFAULT '[]',
+                    pairing_salt TEXT,
+                    pairing_digest TEXT,
+                    pairing_expires_at TEXT,
+                    pairing_attempts INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS catcher_clients (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    token_prefix TEXT NOT NULL,
+                    token_salt TEXT NOT NULL,
+                    token_digest TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    last_seen_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS catcher_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_id TEXT NOT NULL,
+                    client_id TEXT,
+                    status TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 """
+            )
+            db.execute(
+                """INSERT OR IGNORE INTO catcher_settings(
+                       id,enabled,auto_enable,allowed_sources_json,updated_at
+                   ) VALUES(1,0,0,?,?)""",
+                (json.dumps([
+                    "web-deepseek", "web-kimi", "web-qwen", "web-doubao",
+                    "web-perplexity", "web-wenxin",
+                ]), now_iso()),
             )
 
     def _seed_sources(self) -> None:
@@ -107,7 +146,7 @@ class Storage:
             ("web-yuanbao", "元宝 Web", "unsupported_web", "https://yuanbao.tencent.com", "yuanbao-web", "default", False,
              "此来源暂未接入，无需抓取 cURL。元宝网页请求依赖动态安全签名，当前不建议配置。"),
             ("web-kimi", "Kimi Web", "kimi_web", "https://www.kimi.com", "kimi-web", "k2d6-chat", False,
-             "F12 → 网络 → Fetch/XHR → 过滤 ChatService/Chat → 发送一条新消息 → 选择 POST 请求 → 右键复制 → Copy as cURL (bash)\n必须包含 Authorization；该访问令牌约 15 分钟后过期，当前需重新复制。"),
+             "F12 → 网络 → Fetch/XHR → 过滤 ChatService/Chat → 发送一条新消息 → 选择 POST 请求 → 右键复制 → Copy as cURL (bash)\n必须包含 Authorization；手动复制的访问令牌约 15 分钟后过期，建议使用浏览器同步自动获取刷新令牌。"),
             ("web-perplexity", "Perplexity Web", "perplexity_web", "https://www.perplexity.ai", "perplexity-web", "turbo", False,
              "F12 → 网络 → Fetch/XHR → 先发送一条新消息 → 过滤 perplexity_ask（搜不到改搜 rest/sse，并切到“全部”）→ 选择 POST 请求 → 右键复制 → Copy as cURL (bash)\nx-pplx-account 是该请求“标头”里的账号标识，不是过滤关键词；选中请求后在 标头 → 请求标头 中确认。"),
             ("web-wenxin", "文心 Web", "wenxin_web", "https://wenxin.baidu.com", "wenxin-web", "smartMode", False,
@@ -146,8 +185,9 @@ class Storage:
                     )
                 db.execute(
                     "INSERT OR IGNORE INTO models(id,source_id,public_name,upstream_name,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
-                    (f"model-{sid}", sid, public_name, upstream, int(enabled), stamp, stamp),
+                    (f"model-{sid}", sid, public_name, upstream, 1, stamp, stamp),
                 )
+                db.execute("UPDATE models SET enabled=1,updated_at=? WHERE id=?", (stamp, f"model-{sid}"))
                 if sid == "web-kimi":
                     db.execute("UPDATE models SET upstream_name=?,updated_at=? WHERE source_id=? AND upstream_name='default'", (upstream, stamp, sid))
 
@@ -309,6 +349,147 @@ class Storage:
         with self._connect() as db:
             stamp = now_iso()
             db.execute("UPDATE sources SET health_status=?,health_message=?,last_checked_at=?,updated_at=? WHERE id=?", (status, message[:500], stamp, stamp, source_id))
+
+    def update_source_credential(self, source_id: str, credential: dict[str, Any]) -> None:
+        cipher = self.secrets.encrypt_json(credential)
+        with self._connect() as db:
+            db.execute(
+                "UPDATE sources SET credential_cipher=?,updated_at=? WHERE id=?",
+                (cipher, now_iso(), source_id),
+            )
+
+    def catcher_state(self) -> dict[str, Any]:
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM catcher_settings WHERE id=1").fetchone()
+            clients = db.execute(
+                """SELECT id,name,token_prefix,enabled,created_at,last_seen_at
+                   FROM catcher_clients ORDER BY created_at DESC"""
+            ).fetchall()
+            events = db.execute(
+                """SELECT source_id,client_id,status,message,created_at
+                   FROM catcher_events ORDER BY id DESC LIMIT 12"""
+            ).fetchall()
+        expires_at = row["pairing_expires_at"] if row else None
+        pairing_active = False
+        if expires_at:
+            try:
+                pairing_active = datetime.fromisoformat(expires_at) > datetime.now(UTC)
+            except ValueError:
+                pairing_active = False
+        return {
+            "enabled": bool(row["enabled"]) if row else False,
+            "auto_enable": bool(row["auto_enable"]) if row else False,
+            "allowed_source_ids": json.loads(row["allowed_sources_json"] or "[]") if row else [],
+            "pairing_active": pairing_active,
+            "pairing_expires_at": expires_at if pairing_active else None,
+            "clients": [dict(item) | {"enabled": bool(item["enabled"])} for item in clients],
+            "events": [dict(item) for item in events],
+        }
+
+    def update_catcher_settings(
+        self,
+        *,
+        enabled: bool,
+        auto_enable: bool,
+        allowed_source_ids: list[str],
+    ) -> None:
+        with self._connect() as db:
+            db.execute(
+                """UPDATE catcher_settings
+                   SET enabled=?,auto_enable=?,allowed_sources_json=?,updated_at=?
+                   WHERE id=1""",
+                (int(enabled), int(auto_enable), json.dumps(allowed_source_ids), now_iso()),
+            )
+
+    def create_catcher_pairing(self) -> tuple[str, str]:
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        salt, digest = hash_token(code)
+        expires_at = (datetime.now(UTC) + timedelta(minutes=10)).isoformat()
+        with self._connect() as db:
+            db.execute(
+                """UPDATE catcher_settings
+                   SET pairing_salt=?,pairing_digest=?,pairing_expires_at=?,pairing_attempts=0,updated_at=?
+                   WHERE id=1""",
+                (salt, digest, expires_at, now_iso()),
+            )
+        return code, expires_at
+
+    def consume_catcher_pairing(self, code: str, client_name: str) -> tuple[dict[str, Any], str] | None:
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM catcher_settings WHERE id=1").fetchone()
+            if not row or not row["enabled"] or not row["pairing_salt"] or not row["pairing_digest"]:
+                return None
+            try:
+                active = datetime.fromisoformat(row["pairing_expires_at"]) > datetime.now(UTC)
+            except (TypeError, ValueError):
+                active = False
+            if not active or row["pairing_attempts"] >= 10:
+                return None
+            if not verify_token(code.strip(), row["pairing_salt"], row["pairing_digest"]):
+                db.execute(
+                    "UPDATE catcher_settings SET pairing_attempts=pairing_attempts+1,updated_at=? WHERE id=1",
+                    (now_iso(),),
+                )
+                return None
+
+            token = "abc_" + secrets.token_urlsafe(32)
+            salt, digest = hash_token(token)
+            client_id = str(uuid.uuid4())
+            stamp = now_iso()
+            name = (client_name or "Chrome 扩展").strip()[:80] or "Chrome 扩展"
+            db.execute(
+                """INSERT INTO catcher_clients(
+                       id,name,token_prefix,token_salt,token_digest,enabled,created_at
+                   ) VALUES(?,?,?,?,?,1,?)""",
+                (client_id, name, token[:10], salt, digest, stamp),
+            )
+            db.execute(
+                """UPDATE catcher_settings
+                   SET pairing_salt=NULL,pairing_digest=NULL,pairing_expires_at=NULL,pairing_attempts=0,updated_at=?
+                   WHERE id=1""",
+                (stamp,),
+            )
+        return {
+            "id": client_id,
+            "name": name,
+            "token_prefix": token[:10],
+            "enabled": True,
+            "created_at": stamp,
+            "last_seen_at": None,
+        }, token
+
+    def verify_catcher_client(self, token: str) -> dict[str, Any] | None:
+        if not token:
+            return None
+        with self._connect() as db:
+            rows = db.execute(
+                """SELECT id,name,token_prefix,token_salt,token_digest,enabled,created_at,last_seen_at
+                   FROM catcher_clients WHERE enabled=1"""
+            ).fetchall()
+        for row in rows:
+            if token.startswith(row["token_prefix"]) and verify_token(token, row["token_salt"], row["token_digest"]):
+                return dict(row) | {"enabled": True}
+        return None
+
+    def touch_catcher_client(self, client_id: str) -> None:
+        with self._connect() as db:
+            db.execute("UPDATE catcher_clients SET last_seen_at=? WHERE id=?", (now_iso(), client_id))
+
+    def revoke_catcher_client(self, client_id: str) -> None:
+        with self._connect() as db:
+            db.execute("DELETE FROM catcher_clients WHERE id=?", (client_id,))
+
+    def add_catcher_event(self, source_id: str, client_id: str | None, status: str, message: str) -> None:
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO catcher_events(source_id,client_id,status,message,created_at) VALUES(?,?,?,?,?)",
+                (source_id, client_id, status, message[:500], now_iso()),
+            )
+            db.execute(
+                """DELETE FROM catcher_events WHERE id NOT IN (
+                       SELECT id FROM catcher_events ORDER BY id DESC LIMIT 80
+                   )"""
+            )
 
     def save_model(self, source_id: str, public_name: str, upstream_name: str, enabled: bool = True, model_id: str | None = None) -> str:
         model_id = model_id or str(uuid.uuid4())

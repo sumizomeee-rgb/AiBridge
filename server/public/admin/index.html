@@ -23,6 +23,31 @@
       <div id="api-sources" class="source-list"></div>
     </section>
 
+    <section id="catcher" class="block catcher-block">
+      <div class="catcher-head">
+        <div class="catcher-title">
+          <span class="catcher-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 8.5A4.5 4.5 0 0 1 8.5 4H13a4 4 0 0 1 4 4v1.5M20 15.5A4.5 4.5 0 0 1 15.5 20H11a4 4 0 0 1-4-4v-1.5"/><path d="m14 7 3 3 3-3M10 17l-3-3-3 3"/></svg></span>
+          <div><h3>浏览器同步</h3><p>登录官网并发送一句，自动捕获凭证、验活后写入。</p></div>
+        </div>
+        <div class="catcher-master"><span id="catcher-state">未开启</span><button id="catcher-toggle" class="catcher-switch" type="button" role="switch" aria-checked="false" aria-label="浏览器同步开关"><span></span></button></div>
+      </div>
+      <div id="catcher-content" class="catcher-content">
+        <div class="catcher-flow"><span><b>1</b> 安装扩展</span><i></i><span><b>2</b> 输入配对码</span><i></i><span><b>3</b> 登录并发一句</span></div>
+        <div class="catcher-grid">
+          <div class="catcher-pane">
+            <div class="pane-head"><div><strong>扩展配对</strong><small id="catcher-client-summary">尚无扩展连接</small></div><button id="catcher-pair" class="quiet">生成配对码</button></div>
+            <div id="catcher-pairing" class="pairing-code" hidden><span>十分钟内有效</span><code id="catcher-pairing-code">000000</code><button data-copy="catcher-pairing-code">复制</button></div>
+            <div id="catcher-clients" class="catcher-clients"></div>
+          </div>
+          <div class="catcher-pane">
+            <div class="pane-head"><div><strong>同步范围</strong><small>只监听你允许的官网对话接口</small></div><label class="inline-check"><input type="checkbox" id="catcher-auto-enable"><span>验活后启用</span></label></div>
+            <div id="catcher-sources" class="catcher-sources"></div>
+          </div>
+        </div>
+        <div id="catcher-last-event" class="catcher-last-event">等待浏览器捕获</div>
+      </div>
+    </section>
+
     <section id="tokens" class="block access-block">
       <div class="access-head">
         <div><h3>网关接入</h3><p>局域网客户端共用同一个地址与 Token</p></div>
@@ -104,7 +129,7 @@
         <summary>管理台来源图标（可选）</summary>
         <label>SVG 代码<textarea id="source-icon-svg" rows="5" placeholder="<svg viewBox=&quot;0 0 32 32&quot;>…</svg>"></textarea><small>仅用于管理台显示；留空则使用名称缩写。Web 来源图标由项目内置。</small></label>
       </details>
-      <div class="dialog-actions"><button type="button" class="quiet" data-close>取消</button><button type="submit" class="primary">保存配置</button></div>
+      <div class="dialog-actions"><button type="button" class="quiet" data-close>取消</button><button type="submit" class="primary">保存并检查</button></div>
     </form>
   </dialog>
 

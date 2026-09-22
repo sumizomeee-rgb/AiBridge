@@ -480,6 +480,71 @@ def _deepseek_stream_hint(raw: str) -> str:
     return f"HTTP 200，未识别事件结构（{len(raw.encode(errors='replace'))} bytes）"
 
 
+def _jwt_expiry(token: str) -> int | None:
+    try:
+        raw = token.removeprefix("Bearer ").removeprefix("bearer ").split(".")[1]
+        raw += "=" * (-len(raw) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(raw.encode()).decode())
+        return int(payload["exp"])
+    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+async def refresh_kimi_credential(source: dict[str, Any]) -> bool:
+    """在访问令牌即将到期时使用扩展捕获的刷新令牌续期。"""
+    if source.get("protocol") != "kimi_web":
+        return False
+    credential = source.get("credential") or {}
+    refresh_token = str(credential.get("refresh_token") or "").strip()
+    if not refresh_token:
+        return False
+    headers = {str(key): str(value) for key, value in (credential.get("headers") or {}).items()}
+    auth_name = next((key for key in headers if key.lower() == "authorization"), "Authorization")
+    access_token = headers.get(auth_name, "")
+    expiry = _jwt_expiry(access_token)
+    if expiry is not None and expiry > int(time.time()) + 90:
+        return False
+
+    captured_url = str(credential.get("request_url") or "https://www.kimi.com")
+    parts = urlsplit(captured_url)
+    origin = f"{parts.scheme or 'https'}://{parts.netloc or 'www.kimi.com'}"
+    refresh_headers = {
+        key: value for key, value in headers.items()
+        if key.lower().startswith("x-msh-") or key.lower() in {"accept-language", "r-timezone", "user-agent"}
+    }
+    refresh_headers.update({
+        "content-type": "application/json",
+        "connect-protocol-version": "1",
+        "origin": origin,
+        "referer": f"{origin}/",
+    })
+    timeout = httpx.Timeout(15, read=30, write=15, pool=10)
+    try:
+        async with httpx.AsyncClient(timeout=timeout, http2=True, follow_redirects=True) as client:
+            response = await client.post(
+                "https://auth.kimi.com/api/account.gateway.v1.AuthService/RefreshToken",
+                headers=refresh_headers,
+                json={"refresh_token": refresh_token},
+            )
+    except httpx.HTTPError as exc:
+        raise ProviderError(f"Kimi 访问令牌刷新失败：{str(exc)[:180]}", "network_error") from exc
+    if response.status_code >= 400:
+        raise classify_http(response.status_code, response.text)
+    try:
+        data = response.json()
+        access = data.get("access_token") or data.get("accessToken")
+        refreshed = data.get("refresh_token") or data.get("refreshToken")
+    except (AttributeError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise ProviderError("Kimi 刷新令牌响应格式已变化", "protocol_mismatch") from exc
+    if not isinstance(access, str) or not access or not isinstance(refreshed, str) or not refreshed:
+        raise ProviderError("Kimi 刷新令牌响应缺少新令牌", "protocol_mismatch")
+    headers[auth_name] = access if access.lower().startswith("bearer ") else f"Bearer {access}"
+    credential["headers"] = headers
+    credential["refresh_token"] = refreshed
+    source["credential"] = credential
+    return True
+
+
 async def _stream_qwen(source: dict[str, Any], req: CanonicalRequest) -> AsyncIterator[CanonicalEvent]:
     captured_url, headers = _web_headers(source)
     if not captured_url and not headers.get("cookie"):
@@ -489,8 +554,16 @@ async def _stream_qwen(source: dict[str, Any], req: CanonicalRequest) -> AsyncIt
     parts = urlsplit(completion_url)
     query = dict(parse_qsl(parts.query, keep_blank_values=True))
     timestamp = int(time.time())
+    if not any(key.lower() == "version" for key in headers):
+        headers["Version"] = "0.2.91"
+
+    def request_headers() -> dict[str, str]:
+        current = {key: value for key, value in headers.items() if key.lower() != "x-request-id"}
+        current["X-Request-Id"] = str(uuid.uuid4())
+        return current
+
     chat_seed = {"chatId": "", "models": [req.upstream_model], "project_id": "", "timestamp": timestamp * 1000, "chat_type": "t2t", "chat_mode": "normal"}
-    status, raw = await _curl_post(f"{parts.scheme}://{parts.netloc}/api/v2/chats/new", headers, chat_seed)
+    status, raw = await _curl_post(f"{parts.scheme}://{parts.netloc}/api/v2/chats/new", request_headers(), chat_seed)
     if status >= 400:
         raise classify_http(status, raw)
     try:
@@ -506,7 +579,7 @@ async def _stream_qwen(source: dict[str, Any], req: CanonicalRequest) -> AsyncIt
         "messages": [{"id": None, "fid": fid, "parentId": None, "childrenIds": [str(uuid.uuid4())], "role": "user", "content": flatten_web_prompt(req), "user_action": "chat", "files": [], "timestamp": timestamp, "models": [req.upstream_model], "model": "", "chat_type": "t2t", "feature_config": {"thinking_enabled": True, "output_schema": "phase", "research_mode": "normal", "auto_thinking": True, "thinking_mode": "Auto", "thinking_format": "summary", "auto_search": False}, "extra": {"meta": {"subChatType": "t2t"}}, "sub_chat_type": "t2t", "parent_id": None}],
         "timestamp": timestamp,
     }
-    status, raw = await _curl_post(completion_url, headers, body)
+    status, raw = await _curl_post(completion_url, request_headers(), body)
     if status >= 400:
         raise classify_http(status, raw)
     saw_event = False
