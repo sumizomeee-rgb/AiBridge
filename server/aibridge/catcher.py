@@ -51,6 +51,13 @@ CAPTURE_RULES: dict[str, dict[str, Any]] = {
         "origins": ["https://wenxin.baidu.com/*", "https://chat.baidu.com/*"],
         "grade": "stable",
     },
+    "web-longcat": {
+        "name": "LongCat Web",
+        "hosts": {"longcat.chat"},
+        "path_contains": "/api/v1/chat-completion-V2",
+        "origins": ["https://longcat.chat/*"],
+        "grade": "experimental",
+    },
 }
 
 
@@ -97,6 +104,7 @@ def _header_map(raw: Any) -> dict[str, str]:
         "connect-protocol-version", "origin", "priority", "referer", "r-timezone",
         "user-agent", "$bx-ua", "bx-umidtoken", "bx-v", "source", "timezone",
         "version",
+        "m-appkey", "m-traceid", "mtgsig",
     }
     headers: dict[str, str] = {}
     for name, value in pairs:
@@ -173,6 +181,12 @@ def build_capture_credential(payload: dict[str, Any]) -> tuple[str, dict[str, An
         cookie = payload["cookie"].strip()[:262144]
 
     body, body_base64 = _captured_body(payload.get("body"))
+    if source_id == "web-longcat":
+        headers = {
+            name: value for name, value in headers.items()
+            if name.lower() not in {"mtgsig", "m-traceid"}
+        }
+        body, body_base64 = "", ""
     credential: dict[str, Any] = {
         "request_url": request_url,
         "headers": headers,
@@ -181,6 +195,8 @@ def build_capture_credential(payload: dict[str, Any]) -> tuple[str, dict[str, An
     }
     if body_base64:
         credential["body_base64"] = body_base64
+    if source_id == "web-longcat":
+        credential["browser_relay"] = True
 
     page_storage = payload.get("page_storage")
     if source_id == "web-kimi" and isinstance(page_storage, dict):

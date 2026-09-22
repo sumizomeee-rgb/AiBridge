@@ -33,7 +33,7 @@ Token 既可放在 `Authorization: Bearer ...`，也可放在 Anthropic 常用�
 
 ## 来源类型
 
-- Web：DeepSeek、千问、豆包、Kimi、Perplexity、文心等。每个来源对外暴露一个可编辑模型名。Cookie/cURL 只加密保存在 `server/data`，不会写入 Git。
+- Web：DeepSeek、千问、豆包、Kimi、Perplexity、文心、LongCat 等。每个来源对外暴露一个可编辑模型名。Cookie/cURL 只加密保存在 `server/data`，不会写入 Git。LongCat 使用已配对的 AiBridge Catcher 在官网页面中实时生成安全签名，调用期间需要保持 `longcat.chat` 页面打开。
 - 标准 API：支持 OpenAI 兼容和 Anthropic 兼容上游，每个来源可以配置多个模型映射。
 
 首次启动会尝试从本机 CC Switch 的 Claude 配置导入 DeepSeek Anthropic 上游；只读取本机数据库，密钥不会输出到日志。
@@ -51,3 +51,7 @@ Token 既可放在 `Authorization: Bearer ...`，也可放在 Anthropic 常用�
 Web 来源会压缩 Claude Code 等 Agent 注入的大段系统提示与工具 schema，并通过网关工具桥还原 OpenAI `tool_calls` 和 Anthropic `tool_use`。桥接支持工具结果回送与 DeepSeek Web 的 DSML 调用格式，已可完成多轮本地工具任务；但官网协议随时可能变化，可靠性仍低于原生标准 API。
 
 Web 工具方言按来源隔离：DeepSeek Web 才解析 DSML，豆包与千问只解析网关标准标签。自定义 API 来源不进入 Web 工具桥，也不做跨协议伪装：OpenAI API 条目使用 `/v1/chat/completions`，Anthropic API 条目使用 `/v1/messages`。
+
+## Web 来源开发约定
+
+新增 Web 来源时必须同时完成协议适配、Catcher 规则、现有数据库迁移和管理台展示。供应商图标应使用官网公开的品牌资源并保存到 `server/public/admin/providers/`，不得以文字缩写占位；对应路径必须加入管理台浏览器冒烟测试。新增 Catcher 来源还要为已有安装执行一次性白名单迁移，同时保留用户迁移后的手动开关选择。

@@ -121,6 +121,10 @@ class Storage:
                     message TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS app_migrations (
+                    name TEXT PRIMARY KEY,
+                    applied_at TEXT NOT NULL
+                );
                 """
             )
             db.execute(
@@ -129,9 +133,26 @@ class Storage:
                    ) VALUES(1,0,0,?,?)""",
                 (json.dumps([
                     "web-deepseek", "web-kimi", "web-qwen", "web-doubao",
-                    "web-perplexity", "web-wenxin",
+                    "web-perplexity", "web-wenxin", "web-longcat",
                 ]), now_iso()),
             )
+            migration = "catcher-allow-web-longcat-v1"
+            if not db.execute("SELECT 1 FROM app_migrations WHERE name=?", (migration,)).fetchone():
+                row = db.execute("SELECT allowed_sources_json FROM catcher_settings WHERE id=1").fetchone()
+                try:
+                    allowed_source_ids = json.loads(row["allowed_sources_json"] or "[]") if row else []
+                except json.JSONDecodeError:
+                    allowed_source_ids = []
+                if "web-longcat" not in allowed_source_ids:
+                    allowed_source_ids.append("web-longcat")
+                    db.execute(
+                        "UPDATE catcher_settings SET allowed_sources_json=?,updated_at=? WHERE id=1",
+                        (json.dumps(allowed_source_ids), now_iso()),
+                    )
+                db.execute(
+                    "INSERT INTO app_migrations(name,applied_at) VALUES(?,?)",
+                    (migration, now_iso()),
+                )
 
     def _seed_sources(self) -> None:
         seeds = [
@@ -151,6 +172,8 @@ class Storage:
              "F12 → 网络 → Fetch/XHR → 先发送一条新消息 → 过滤 perplexity_ask（搜不到改搜 rest/sse，并切到“全部”）→ 选择 POST 请求 → 右键复制 → Copy as cURL (bash)\nx-pplx-account 是该请求“标头”里的账号标识，不是过滤关键词；选中请求后在 标头 → 请求标头 中确认。"),
             ("web-wenxin", "文心 Web", "wenxin_web", "https://wenxin.baidu.com", "wenxin-web", "smartMode", False,
              "F12 → 网络 → Fetch/XHR → 过滤 /aichat/api/conversation → 发送一条新消息 → 选择 POST 请求 → 右键复制 → Copy as cURL (bash)\n必须复制完整 cURL（HAR 会移除 Cookie）；请求正文需包含 chat_token。"),
+            ("web-longcat", "LongCat Web", "longcat_web", "https://longcat.chat", "longcat-web", "LongCat-2.0-Preview-LongCatAI", False,
+             "此来源依赖浏览器实时生成 H5Guard 签名。请安装并配对 AiBridge Catcher，授权 longcat.chat，然后在官网发送一句消息完成中继配置；使用期间需保留 LongCat 页面。"),
         ]
         with self._connect() as db:
             for sid, name, protocol, base_url, public_name, upstream, enabled, guide in seeds:
@@ -166,7 +189,7 @@ class Storage:
                     config["guide"] = guide
                     changed = True
                 if protocol != "web_auto" and "max_concurrency" not in config:
-                    config["max_concurrency"] = 3
+                    config["max_concurrency"] = 1 if protocol == "longcat_web" else 3
                     changed = True
                 if protocol == "web_auto" and config.get("routing_mode") not in {"smart", "custom"}:
                     config["routing_mode"] = "smart"
@@ -274,9 +297,10 @@ class Storage:
                        WHEN id='web-kimi' THEN 4
                        WHEN id='web-perplexity' THEN 5
                        WHEN id='web-wenxin' THEN 6
-                       WHEN id='web-yuanbao' THEN 7
-                       WHEN kind='web' THEN 8
-                       ELSE 9
+                       WHEN id='web-longcat' THEN 7
+                       WHEN id='web-yuanbao' THEN 8
+                       WHEN kind='web' THEN 9
+                       ELSE 10
                    END, created_at"""
             ).fetchall()
             result = []

@@ -29,7 +29,7 @@ def main() -> None:
         assert page.locator(".source-row").count() >= 7
         assert page.locator(".source-switch").count() == page.locator(".source-row").count()
         assert page.get_by_role("heading", name="浏览器同步", exact=True).is_visible()
-        assert page.locator("[data-catcher-source]").count() == 6
+        assert page.locator("[data-catcher-source]").count() == 7
         catcher_switch = page.locator("#catcher-toggle")
         catcher_initial = catcher_switch.get_attribute("aria-checked")
         catcher_toggled = "false" if catcher_initial == "true" else "true"
@@ -121,6 +121,11 @@ def main() -> None:
         assert "过滤 /aichat/api/conversation" in page.locator("#web-guide").inner_text()
         assert "chat_token" in page.locator("#source-curl").get_attribute("placeholder")
         page.locator("[data-close]").first.click()
+        longcat = page.locator('.source-row[data-source="web-longcat"]')
+        assert longcat.locator('img[src="/assets/providers/longcat.svg"]').count() == 1
+        longcat_icon = page.request.get("http://127.0.0.1:7009/assets/providers/longcat.svg")
+        assert longcat_icon.ok
+        assert longcat_icon.text().startswith("<svg")
         deepseek.get_by_role("button", name="配置来源").click()
         assert "deepseek-flash = deepseek-flash" in page.locator("#source-models").input_value()
         assert "claude-sonnet-4-5-20250929" not in page.locator("#source-models").input_value()

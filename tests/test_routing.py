@@ -254,8 +254,8 @@ class StorageSeedTests(unittest.TestCase):
             storage = Storage(root / "aibridge.db", root / "secret.key")
             sources = storage.list_sources()
             self.assertEqual(
-                [source["id"] for source in sources[:8]],
-                ["web-auto", "web-deepseek", "web-qwen", "web-doubao", "web-kimi", "web-perplexity", "web-wenxin", "web-yuanbao"],
+                [source["id"] for source in sources[:9]],
+                ["web-auto", "web-deepseek", "web-qwen", "web-doubao", "web-kimi", "web-perplexity", "web-wenxin", "web-longcat", "web-yuanbao"],
             )
             auto = sources[0]
             self.assertEqual(auto["models"][0]["public_name"], "web-auto")
@@ -271,7 +271,11 @@ class StorageSeedTests(unittest.TestCase):
             wenxin = next(source for source in sources if source["id"] == "web-wenxin")
             self.assertEqual(wenxin["protocol"], "wenxin_web")
             self.assertEqual(wenxin["models"][0]["upstream_name"], "smartMode")
-            for source in sources[1:8]:
+            longcat = next(source for source in sources if source["id"] == "web-longcat")
+            self.assertEqual(longcat["protocol"], "longcat_web")
+            self.assertEqual(longcat["models"][0]["upstream_name"], "LongCat-2.0-Preview-LongCatAI")
+            self.assertEqual(longcat["config"]["max_concurrency"], 1)
+            for source in sources[1:7]:
                 self.assertEqual(source["config"]["max_concurrency"], 3)
 
 

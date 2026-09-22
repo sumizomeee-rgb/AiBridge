@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import re
 import shlex
 import shutil
@@ -22,6 +23,10 @@ except (ImportError, OSError):
     CurlAsyncSession = None
 
 from .protocols import CanonicalEvent, CanonicalRequest, flatten_web_prompt, parse_web_tool_response, to_anthropic_upstream, to_openai_upstream, web_tool_bridge_enabled
+from .relay import RelayError, relay_broker
+
+
+logger = logging.getLogger(__name__)
 
 
 class ProviderError(RuntimeError):
@@ -214,6 +219,120 @@ def _web_headers(source: dict[str, Any]) -> tuple[str, dict[str, str]]:
     headers.setdefault("content-type", "application/json")
     headers.setdefault("accept", "text/event-stream")
     return request_url, headers
+
+
+def _parse_longcat_stream(raw: str) -> list[CanonicalEvent]:
+    events: list[CanonicalEvent] = []
+    text_parts: list[str] = []
+    final_text = ""
+    for line in raw.splitlines():
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload:
+            continue
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        event = data.get("event") or {}
+        kind = event.get("type")
+        if kind == "content" and isinstance(event.get("content"), str):
+            chunk = event["content"]
+            if chunk:
+                text_parts.append(chunk)
+                events.append(CanonicalEvent("text", text=chunk))
+        elif kind == "finish":
+            if isinstance(event.get("finalContentX"), str):
+                final_text = event["finalContentX"]
+            usage = event.get("usage") or data.get("tokenInfo") or {}
+            if usage:
+                events.append(CanonicalEvent("usage", usage={
+                    "prompt_tokens": int(usage.get("inputTokens") or usage.get("promptTokens") or 0),
+                    "completion_tokens": int(usage.get("outputTokens") or usage.get("completionTokens") or 0),
+                    "total_tokens": int(usage.get("totalTokens") or 0),
+                }))
+    if not text_parts and final_text:
+        events.insert(0, CanonicalEvent("text", text=final_text))
+    return events
+
+
+def _longcat_stream_diagnostic(raw: str) -> str:
+    event_types: list[str] = []
+    data_lines = 0
+    malformed = 0
+    for line in raw.splitlines():
+        if not line.startswith("data:"):
+            continue
+        data_lines += 1
+        try:
+            data = json.loads(line[5:].strip())
+        except json.JSONDecodeError:
+            malformed += 1
+            continue
+        event = data.get("event") if isinstance(data, dict) else None
+        kind = event.get("type") if isinstance(event, dict) else None
+        if isinstance(kind, str) and kind not in event_types:
+            event_types.append(kind)
+    details = [f"响应 {len(raw.encode('utf-8'))} 字节", f"SSE 数据 {data_lines} 条"]
+    if event_types:
+        details.append(f"事件类型 {','.join(event_types[:8])}")
+    if malformed:
+        details.append(f"无法解析 {malformed} 条")
+    if data_lines == 0 and raw.strip():
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            details.append("非 JSON/SSE 响应")
+        else:
+            if isinstance(payload, dict):
+                if payload.get("code") is not None:
+                    details.append(f"code={str(payload['code'])[:40]}")
+                if payload.get("message"):
+                    details.append(f"message={str(payload['message'])[:120]}")
+    return "；".join(details)
+
+
+async def _stream_longcat(source: dict[str, Any], req: CanonicalRequest) -> AsyncIterator[CanonicalEvent]:
+    credential = source.get("credential") or {}
+    if credential.get("browser_relay") is not True:
+        raise ProviderError("LongCat 需要通过 AiBridge Catcher 完成浏览器中继配置", "unconfigured", 400)
+    captured_headers = credential.get("headers") or {}
+    relay_headers = {
+        str(name): str(value) for name, value in captured_headers.items()
+        if str(name).lower() in {"m-appkey", "x-client-language", "x-requested-with", "access-token"}
+        and str(value) not in {"", "undefined", "null"}
+    }
+    try:
+        response = await relay_broker.request(
+            "web-longcat",
+            "longcat_chat",
+            {"prompt": flatten_web_prompt(req), "headers": relay_headers},
+        )
+    except RelayError as exc:
+        raise ProviderError(str(exc), "browser_relay_unavailable", 503) from exc
+    status = int(response.get("status") or 0)
+    raw = str(response.get("body") or "")
+    if status == 418:
+        raise ProviderError(
+            "LongCat 触发美团安全验证（HTTP 418）；请在 longcat.chat 页面完成验证后重试",
+            "challenge",
+            502,
+        )
+    if status >= 400:
+        raise classify_http(status, raw)
+    events = _parse_longcat_stream(raw)
+    if not any(event.type in {"text", "reasoning", "tool"} for event in events):
+        diagnostic = _longcat_stream_diagnostic(raw)
+        logger.warning(
+            "LongCat 响应无法解析：阶段=%s，HTTP=%s，%s",
+            str(response.get("stage") or "未知")[:40],
+            status,
+            diagnostic,
+        )
+        raise ProviderError(f"LongCat 响应中没有可识别的文本（{diagnostic}）", "protocol_mismatch")
+    for event in events:
+        yield event
 
 
 async def _curl_post(url: str, headers: dict[str, str], body: dict[str, Any]) -> tuple[int, str]:
@@ -1017,6 +1136,9 @@ def stream_source(source: dict[str, Any], req: CanonicalRequest) -> AsyncIterato
         dialect = "standard"
     elif protocol == "wenxin_web":
         events = _stream_wenxin(source, req)
+        dialect = "standard"
+    elif protocol == "longcat_web":
+        events = _stream_longcat(source, req)
         dialect = "standard"
     else:
         raise ProviderError("该 Web 来源尚未实现直连适配器", "unsupported", 400)

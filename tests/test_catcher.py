@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -76,6 +77,27 @@ class CatcherCaptureTests(unittest.TestCase):
         self.assertEqual(credential["headers"]["$bx-ua"], "signed-browser-data")
         self.assertEqual(credential["body"], '{"stream":true}')
 
+    def test_longcat_capture_enables_relay_without_saving_ephemeral_signature(self) -> None:
+        source_id, credential = build_capture_credential({
+            "source_id": "web-longcat",
+            "url": "https://longcat.chat/api/v1/chat-completion-V2?yodaReady=h5",
+            "method": "POST",
+            "headers": {
+                "m-appkey": "stable-app-key",
+                "m-traceid": "ephemeral-trace",
+                "mtgsig": "ephemeral-signature",
+                "x-client-language": "zh-CN",
+            },
+            "body": {"text": '{"conversationId":"old","content":"old"}'},
+        })
+        self.assertEqual(source_id, "web-longcat")
+        self.assertTrue(credential["browser_relay"])
+        self.assertEqual(credential["headers"]["m-appkey"], "stable-app-key")
+        normalized = {key.lower(): value for key, value in credential["headers"].items()}
+        self.assertNotIn("m-traceid", normalized)
+        self.assertNotIn("mtgsig", normalized)
+        self.assertEqual(credential["body"], "")
+
     def test_capture_rejects_wrong_host(self) -> None:
         with self.assertRaisesRegex(ValueError, "域名"):
             build_capture_credential({
@@ -86,6 +108,38 @@ class CatcherCaptureTests(unittest.TestCase):
 
 
 class CatcherStorageTests(unittest.TestCase):
+    def test_existing_install_adds_longcat_once_without_overriding_later_choice(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "aibridge.db"
+            secret = root / "secret.key"
+            Storage(database, secret)
+            old_sources = [
+                "web-deepseek", "web-kimi", "web-qwen", "web-doubao",
+                "web-perplexity", "web-wenxin",
+            ]
+            db = sqlite3.connect(database)
+            try:
+                db.execute(
+                    "UPDATE catcher_settings SET enabled=1,auto_enable=1,allowed_sources_json=? WHERE id=1",
+                    (json.dumps(old_sources),),
+                )
+                db.execute("DELETE FROM app_migrations")
+                db.commit()
+            finally:
+                db.close()
+
+            migrated = Storage(database, secret)
+            self.assertIn("web-longcat", migrated.catcher_state()["allowed_source_ids"])
+
+            migrated.update_catcher_settings(
+                enabled=True,
+                auto_enable=True,
+                allowed_source_ids=old_sources,
+            )
+            reopened = Storage(database, secret)
+            self.assertNotIn("web-longcat", reopened.catcher_state()["allowed_source_ids"])
+
     def test_pairing_is_single_use_and_client_token_can_be_verified(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

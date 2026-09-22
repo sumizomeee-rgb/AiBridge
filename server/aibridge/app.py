@@ -9,7 +9,7 @@ import uuid
 from typing import Any, AsyncIterator, Callable
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -27,6 +27,7 @@ from .protocols import (
 )
 from .providers import ProviderError, _api_headers, endpoint, health_check, parse_curl, refresh_kimi_credential
 from .routing import AUTO_SOURCE_ID, RouteContext, SourceScheduler, WebRouter, batch_health_candidates, source_concurrency
+from .relay import relay_broker
 from .settings import STATIC_DIR, settings
 from .storage import Storage
 
@@ -289,7 +290,7 @@ def create_admin_app() -> FastAPI:
         return {
             "client": client,
             "token": token,
-            "protocol_version": 1,
+            "protocol_version": 2,
             "enabled": current["enabled"],
             "allowed_source_ids": current["allowed_source_ids"],
             "rules": public_capture_rules(),
@@ -301,11 +302,37 @@ def create_admin_app() -> FastAPI:
         current = storage.catcher_state()
         storage.touch_catcher_client(client["id"])
         return {
-            "protocol_version": 1,
+            "protocol_version": 2,
             "enabled": current["enabled"],
             "allowed_source_ids": current["allowed_source_ids"],
             "rules": public_capture_rules(),
+            "relay_source_ids": await relay_broker.source_ids(),
         }
+
+    @app.websocket("/api/catcher/v1/relay")
+    async def catcher_relay(websocket: WebSocket):
+        await websocket.accept()
+        try:
+            auth = await asyncio.wait_for(websocket.receive_json(), timeout=10)
+            token = str(auth.get("token") or "") if isinstance(auth, dict) else ""
+            client = storage.verify_catcher_client(token)
+            current = storage.catcher_state()
+            requested = auth.get("source_ids") if isinstance(auth, dict) else []
+            source_ids = {
+                source_id for source_id in requested
+                if isinstance(source_id, str)
+                and source_id in current["allowed_source_ids"]
+                and source_id == "web-longcat"
+            }
+            if not client or not current["enabled"]:
+                await websocket.close(code=4003, reason="扩展未配对或浏览器同步未开启")
+                return
+            storage.touch_catcher_client(client["id"])
+            await relay_broker.attach(client["id"], websocket, source_ids)
+        except (WebSocketDisconnect, RuntimeError):
+            return
+        except TimeoutError:
+            await websocket.close(code=4008, reason="中继认证超时")
 
     @app.post("/api/catcher/v1/captures")
     async def receive_catcher_capture(request: Request):
@@ -341,7 +368,7 @@ def create_admin_app() -> FastAPI:
 
         config = source.get("config", {}) | {
             "captured_by": "AiBridge Catcher",
-            "capture_protocol_version": 1,
+            "capture_protocol_version": int(body.get("protocol_version") or 1),
         }
         storage.save_source(
             {
