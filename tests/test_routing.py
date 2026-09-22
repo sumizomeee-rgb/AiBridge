@@ -4,6 +4,7 @@ import asyncio
 import copy
 import sys
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -13,7 +14,7 @@ sys.path.insert(0, str(ROOT / "server"))
 
 from aibridge.protocols import CanonicalEvent, CanonicalRequest, collect_events
 from aibridge.providers import ProviderError
-from aibridge.routing import RouteContext, SourceScheduler, WebRouter
+from aibridge.routing import RouteContext, SourceScheduler, WebRouter, batch_health_candidates
 from aibridge.storage import Storage
 
 
@@ -172,6 +173,16 @@ class WebRouterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([source["id"] for source in candidates], ["web-qwen", "web-deepseek"])
 
+    async def test_smart_route_skips_unhealthy_source(self) -> None:
+        storage = FakeStorage()
+        qwen = next(source for source in storage.sources if source["id"] == "web-qwen")
+        qwen["health_status"] = "auth_expired"
+
+        router = WebRouter(storage, SourceScheduler())
+        candidates = router.configured_candidates()
+
+        self.assertNotIn("web-qwen", [source["id"] for source in candidates])
+
     async def test_custom_route_never_falls_back_after_selected_source_fails(self) -> None:
         storage = FakeStorage()
         storage.set_custom(["web-deepseek", "web-qwen"])
@@ -221,6 +232,34 @@ class StorageSeedTests(unittest.TestCase):
             self.assertEqual(wenxin["models"][0]["upstream_name"], "smartMode")
             for source in sources[1:8]:
                 self.assertEqual(source["config"]["max_concurrency"], 3)
+
+
+class BatchHealthCandidatesTests(unittest.TestCase):
+    def test_auto_check_uses_enabled_stale_sources_only(self) -> None:
+        now = datetime(2026, 9, 22, 4, 0, tzinfo=UTC)
+        sources = [
+            {"id": "web-auto", "kind": "web", "enabled": True, "has_credential": False},
+            {"id": "web-deepseek", "kind": "web", "enabled": True, "has_credential": True, "last_checked_at": (now - timedelta(minutes=1)).isoformat()},
+            {"id": "web-qwen", "kind": "web", "enabled": False, "has_credential": True, "last_checked_at": (now - timedelta(minutes=10)).isoformat()},
+            {"id": "web-kimi", "kind": "web", "enabled": True, "has_credential": True, "last_checked_at": (now - timedelta(minutes=10)).isoformat()},
+            {"id": "web-doubao", "kind": "web", "enabled": True, "has_credential": False},
+        ]
+
+        candidates, skipped = batch_health_candidates(sources, force=False, now=now)
+
+        self.assertEqual([source["id"] for source in candidates], ["web-kimi"])
+        self.assertEqual(skipped, 3)
+
+    def test_manual_check_includes_disabled_configured_sources(self) -> None:
+        sources = [
+            {"id": "web-qwen", "kind": "web", "enabled": False, "has_credential": True},
+            {"id": "web-doubao", "kind": "web", "enabled": False, "has_credential": False},
+        ]
+
+        candidates, skipped = batch_health_candidates(sources, force=True)
+
+        self.assertEqual([source["id"] for source in candidates], ["web-qwen"])
+        self.assertEqual(skipped, 1)
 
 
 if __name__ == "__main__":

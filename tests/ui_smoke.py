@@ -10,7 +10,16 @@ def main() -> None:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1440, "height": 1000}, device_scale_factor=1)
         page.on("console", lambda message: console_errors.append(message.text) if message.type == "error" else None)
-        page.goto("http://127.0.0.1:7009", wait_until="networkidle")
+        batch_calls: list[dict] = []
+
+        def mock_web_health(route) -> None:
+            batch_calls.append(route.request.post_data_json)
+            route.fulfill(status=200, content_type="application/json", body='{"running":false,"checked":0,"skipped":6,"results":[]}')
+
+        page.route("**/api/web-sources/health", mock_web_health)
+        with page.expect_response(lambda response: response.url.endswith("/api/web-sources/health")):
+            page.goto("http://127.0.0.1:7009", wait_until="networkidle")
+        assert batch_calls == [{"force": False}]
         assert page.title() == "AiBridge 控制台"
         assert page.locator('link[rel="icon"]').get_attribute("href") == "/assets/favicon.svg"
         assert page.locator("#lan-url").is_visible()
@@ -58,6 +67,10 @@ def main() -> None:
         deepseek = page.locator('.source-row[data-source="api-deepseek"]')
         assert deepseek.locator(".status").inner_text() == "可用"
         qwen = page.locator('.source-row[data-source="web-qwen"]')
+        qwen_link = qwen.locator(".provider-link")
+        assert qwen_link.get_attribute("href").startswith("https://chat.qwen.ai")
+        assert qwen_link.get_attribute("target") == "_blank"
+        assert qwen_link.get_attribute("data-tooltip") == "打开 千问 Web 官网"
         qwen.get_by_role("button", name="配置来源").click()
         assert "F12 → 网络 → Fetch/XHR" in page.locator("#web-guide").inner_text()
         assert "api/v2/chat/completions" in page.locator("#web-guide").inner_text()
@@ -83,6 +96,9 @@ def main() -> None:
         assert save_calls == ["save", "health"], save_calls
         page.unroute("**/api/sources/web-qwen", mock_qwen_save)
         page.unroute("**/api/sources/web-qwen/health", mock_qwen_health)
+        with page.expect_response(lambda response: response.url.endswith("/api/web-sources/health")):
+            page.locator("#check-web-sources").click()
+        assert batch_calls[-1] == {"force": True}
         doubao = page.locator('.source-row[data-source="web-doubao"]')
         doubao.get_by_role("button", name="配置来源").click()
         assert "过滤 completion" in page.locator("#web-guide").inner_text()

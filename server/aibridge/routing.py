@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from typing import Any, AsyncIterator, Callable
 
 from .protocols import CanonicalEvent, CanonicalRequest
@@ -21,6 +22,7 @@ SUPPORTED_WEB_PROTOCOLS = {"deepseek_web", "qwen_web", "doubao_web", "kimi_web",
 AUTO_ELIGIBLE_HEALTH = {"healthy", "unchecked"}
 DEFAULT_WEB_CONCURRENCY = 3
 MAX_WEB_CONCURRENCY = 32
+WEB_HEALTH_COOLDOWN_SECONDS = 300
 
 
 def source_concurrency(source: dict[str, Any]) -> int:
@@ -30,6 +32,35 @@ def source_concurrency(source: dict[str, Any]) -> int:
     except (TypeError, ValueError):
         value = DEFAULT_WEB_CONCURRENCY
     return max(1, min(MAX_WEB_CONCURRENCY, value))
+
+
+def batch_health_candidates(
+    sources: list[dict[str, Any]],
+    *,
+    force: bool,
+    now: datetime | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    current = now or datetime.now(UTC)
+    candidates: list[dict[str, Any]] = []
+    skipped = 0
+    for source in sources:
+        if source.get("kind") != "web" or source.get("id") == AUTO_SOURCE_ID:
+            continue
+        if not source.get("has_credential") or (not force and not source.get("enabled")):
+            skipped += 1
+            continue
+        if not force and source.get("last_checked_at"):
+            try:
+                checked_at = datetime.fromisoformat(source["last_checked_at"])
+                if checked_at.tzinfo is None:
+                    checked_at = checked_at.replace(tzinfo=UTC)
+                if (current - checked_at).total_seconds() < WEB_HEALTH_COOLDOWN_SECONDS:
+                    skipped += 1
+                    continue
+            except (TypeError, ValueError):
+                pass
+        candidates.append(source)
+    return candidates, skipped
 
 
 @dataclass

@@ -17,7 +17,7 @@
   <main>
     <section id="sources" class="sources-block">
       <div class="page-head"><div><h1>模型连接</h1><p>Web 会话与标准 API 共用一个网关，兼容 OpenAI / Anthropic。</p></div><button class="primary" id="add-api">＋ 添加 API</button></div>
-      <div class="subhead"><h3>Web 官网直连</h3><span>一个网站对应一个公开模型名</span></div>
+      <div class="subhead"><h3>Web 官网直连</h3><div class="subhead-tools"><span>一个网站对应一个公开模型名</span><button class="icon-action" id="check-web-sources" type="button" data-tooltip="检测全部 Web 来源" aria-label="检测全部 Web 来源"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2.2-5 4.1 10 2.2-5H21"/></svg></button></div></div>
       <div id="web-sources" class="source-list"><div class="skeleton"></div><div class="skeleton"></div></div>
       <div class="subhead api-head"><h3>标准 API</h3><span>支持多个模型映射</span></div>
       <div id="api-sources" class="source-list"></div>

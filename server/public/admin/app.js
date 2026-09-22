@@ -1,8 +1,10 @@
 const $ = (selector) => document.querySelector(selector);
 let state = { sources: [], keys: [], logs: [], gateway: {}, permissions: {}, catcher: {} };
+let checkingWebSources = new Set();
+let webHealthRunning = false;
 
 const statusLabels = {
-  healthy: "可用", unchecked: "待检测", unconfigured: "未配置", unsupported: "未接入",
+  healthy: "可用", checking: "检测中", unchecked: "待检测", unconfigured: "未配置", unsupported: "未接入",
   auth_expired: "鉴权失效", challenge: "风控拦截", protocol_mismatch: "协议异常",
   network_error: "网络异常", upstream_error: "上游错误", invalid_config: "配置不完整",
   rate_limited: "上游限流",
@@ -65,12 +67,24 @@ function sourceSwitch(source) {
 }
 
 function sourceCard(source) {
-  const statusClass = statusLabels[source.health_status] ? source.health_status : "error";
+  const checking = checkingWebSources.has(source.id);
+  const healthStatus = checking ? "checking" : source.health_status;
+  const statusClass = statusLabels[healthStatus] ? healthStatus : "error";
   const initials = source.name.replace(/\s*Web|\s*官方/g, "").slice(0, 2).toUpperCase();
   const fallbackMark = `<span>${escapeHtml(initials)}</span>`;
   const providerMark = source.kind === "web" ? (providerMarks[source.id] || fallbackMark) : apiProviderMark(source, fallbackMark);
   const models = source.models.filter((x) => x.enabled).map((x) => `<span class="model-tag">${escapeHtml(x.public_name)}</span>`).join("") || `<span class="muted">暂无公开模型</span>`;
   const isAuto = source.id === "web-auto";
+  let website = "";
+  if (source.kind === "web" && !isAuto && source.base_url) {
+    try {
+      const parsed = new URL(source.base_url);
+      if (["http:", "https:"].includes(parsed.protocol)) website = parsed.href;
+    } catch { /* 非标准地址不生成外链 */ }
+  }
+  const providerIcon = website
+    ? `<a class="provider-icon provider-link" href="${escapeHtml(website)}" target="_blank" rel="noopener noreferrer" data-tooltip="打开 ${escapeHtml(source.name)} 官网" aria-label="打开 ${escapeHtml(source.name)} 官网">${providerMark}</a>`
+    : `<div class="provider-icon ${isAuto ? "auto" : ""}">${providerMark}</div>`;
   const type = isAuto ? "自动路由" : (source.kind === "web" ? "官网直连" : (source.protocol === "anthropic" ? "Anthropic API" : "OpenAI API"));
   const endpoint = isAuto
     ? `${source.config?.routing_mode === "custom" ? `自定义 ${(source.config?.source_ids || []).length} 个来源` : "智能来源"} · ${source.config?.dispatch_mode === "balanced" ? "均衡轮询" : "优先来源"}`
@@ -83,9 +97,9 @@ function sourceCard(source) {
   if (source.kind === "api" && source.protocol === "openai") actions.push(iconButton("discover", "sync", "同步模型"));
   if (source.kind === "api") actions.push(iconButton("delete", "trash", "删除来源", "danger"));
   return `<article class="source-row ${source.enabled ? "" : "disabled"}" data-source="${escapeHtml(source.id)}">
-    <div class="source-identity"><div class="provider-icon ${isAuto ? "auto" : ""}">${providerMark}</div><div><strong>${escapeHtml(source.name)}</strong><small>${escapeHtml(type)} · ${escapeHtml(endpoint)}</small></div></div>
+    <div class="source-identity">${providerIcon}<div><strong>${escapeHtml(source.name)}</strong><small>${escapeHtml(type)} · ${escapeHtml(endpoint)}</small></div></div>
     <div class="models-wrap"><div class="models">${models}</div>${capacity}</div>
-    <div class="source-health"><span class="status ${statusClass}"><i></i>${escapeHtml(statusLabels[source.health_status] || "异常")}</span><span class="health-copy">${escapeHtml(source.health_message || "尚未检测")}</span>${source.last_checked_at ? `<time>${escapeHtml(formatTime(source.last_checked_at))}</time>` : ""}</div>
+    <div class="source-health"><span class="status ${statusClass}"><i></i>${escapeHtml(statusLabels[healthStatus] || "异常")}</span><span class="health-copy">${escapeHtml(checking ? "正在验证官网会话…" : (source.health_message || "尚未检测"))}</span>${!checking && source.last_checked_at ? `<time>${escapeHtml(formatTime(source.last_checked_at))}</time>` : ""}</div>
     <div class="row-actions">${sourceSwitch(source)}${actions.join("")}</div>
   </article>`;
 }
@@ -160,6 +174,38 @@ async function load() {
   state = await api("/api/state");
   $("#lan-url").textContent = state.gateway.lan_url;
   renderSources(); renderCatcher(); renderKeys(); renderLogs();
+}
+
+async function checkAllWebSources(force = false, silent = false) {
+  if (webHealthRunning) return;
+  const targets = state.sources.filter((source) => source.kind === "web" && source.id !== "web-auto" && source.has_credential && (force || source.enabled));
+  const button = $("#check-web-sources");
+  webHealthRunning = true;
+  checkingWebSources = new Set(targets.map((source) => source.id));
+  button.disabled = true;
+  button.classList.add("checking");
+  button.setAttribute("aria-busy", "true");
+  button.dataset.tooltip = "正在检测 Web 来源";
+  renderSources();
+  try {
+    const result = await api("/api/web-sources/health", { method: "POST", body: JSON.stringify({ force }) });
+    if (!silent) {
+      const failures = (result.results || []).filter((item) => item.status !== "healthy").length;
+      if (result.running) toast("已有一轮 Web 健康检查正在进行");
+      else if (!result.checked) toast("没有需要检测的 Web 来源");
+      else toast(`已检测 ${result.checked} 个来源${failures ? `，${failures} 个异常` : "，全部可用"}`, failures > 0);
+    }
+  } catch (error) {
+    if (!silent) toast(`批量健康检查失败：${error.message}`, true);
+  } finally {
+    checkingWebSources.clear();
+    webHealthRunning = false;
+    button.disabled = false;
+    button.classList.remove("checking");
+    button.setAttribute("aria-busy", "false");
+    button.dataset.tooltip = "检测全部 Web 来源";
+    await load().catch(() => { /* 保留当前界面 */ });
+  }
 }
 
 function setLogsCollapsed(collapsed, remember = true) {
@@ -456,6 +502,7 @@ $("#catcher-sources").addEventListener("change", async (event) => {
   } catch (error) { toast(error.message, true); }
 });
 $("#refresh").addEventListener("click", () => load().then(() => toast("状态已刷新")).catch((error) => toast(error.message, true)));
+$("#check-web-sources").addEventListener("click", () => checkAllWebSources(true));
 $("#logs-toggle").addEventListener("click", () => setLogsCollapsed(!$("#logs-content").classList.contains("collapsed")));
 $("#create-key").addEventListener("click", async () => {
   try {
@@ -470,7 +517,9 @@ $("#create-key").addEventListener("click", async () => {
 let initialLogsCollapsed = false;
 try { initialLogsCollapsed = localStorage.getItem("aibridge.logs.collapsed") === "1"; } catch { /* 浏览器禁用存储时默认展开 */ }
 setLogsCollapsed(initialLogsCollapsed, false);
-load().catch((error) => toast(`无法加载控制台：${error.message}`, true));
+load()
+  .then(() => checkAllWebSources(false, true))
+  .catch((error) => toast(`无法加载控制台：${error.message}`, true));
 setInterval(() => {
   if (document.hidden || $("#source-dialog").open || $("#token-dialog").open) return;
   load().catch(() => { /* 后台刷新失败时保留当前界面 */ });

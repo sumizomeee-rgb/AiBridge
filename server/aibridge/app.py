@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import socket
@@ -25,7 +26,7 @@ from .protocols import (
     sse,
 )
 from .providers import ProviderError, _api_headers, endpoint, health_check, parse_curl, refresh_kimi_credential
-from .routing import AUTO_SOURCE_ID, RouteContext, SourceScheduler, WebRouter, source_concurrency
+from .routing import AUTO_SOURCE_ID, RouteContext, SourceScheduler, WebRouter, batch_health_candidates, source_concurrency
 from .settings import STATIC_DIR, settings
 from .storage import Storage
 
@@ -211,6 +212,7 @@ def create_gateway_app() -> FastAPI:
 
 def create_admin_app() -> FastAPI:
     app = FastAPI(title="AiBridge Admin", version="2.0.0", docs_url=None, redoc_url=None)
+    web_health_batch_lock = asyncio.Lock()
     app.add_middleware(
         CORSMiddleware,
         allow_origin_regex=r"chrome-extension://[a-p]{32}",
@@ -467,6 +469,33 @@ def create_admin_app() -> FastAPI:
                 await lease.release()
         storage.update_health(source_id, status, message)
         return {"status": status, "message": message}
+
+    @app.post("/api/web-sources/health")
+    async def web_sources_health(request: Request):
+        body = await request.json()
+        force = body.get("force") is True
+        if web_health_batch_lock.locked():
+            return {"running": True, "checked": 0, "skipped": 0, "results": []}
+
+        async with web_health_batch_lock:
+            candidates, skipped = batch_health_candidates(storage.list_sources(), force=force)
+
+            async def check(source: dict[str, Any]) -> dict[str, Any]:
+                try:
+                    result = await source_health(source["id"])
+                except Exception as exc:
+                    message = f"批量健康检查失败：{type(exc).__name__}: {str(exc)[:180]}"
+                    storage.update_health(source["id"], "upstream_error", message)
+                    result = {"status": "upstream_error", "message": message}
+                return {"source_id": source["id"], "name": source["name"], **result}
+
+            results = await asyncio.gather(*(check(source) for source in candidates))
+            return {
+                "running": False,
+                "checked": len(results),
+                "skipped": skipped,
+                "results": results,
+            }
 
     @app.post("/api/sources/{source_id}/discover-models")
     async def discover_models(source_id: str):

@@ -53,6 +53,9 @@ h3 { margin: 0; font-size: 15px; }
 .subhead { margin: 18px 1px 9px; }
 .subhead span, .muted { color: var(--muted); }
 .subhead span { font-size: 12px; }
+.subhead-tools { display: flex; align-items: center; gap: 8px; }
+.subhead-tools .icon-action { width: 31px; height: 31px; }
+.subhead-tools .icon-action.checking svg { animation: health-pulse 1s ease-in-out infinite; }
 .api-head { margin-top: 22px; }
 
 .source-list { overflow: visible; border: 1px solid var(--line); border-radius: 13px; background: var(--panel); box-shadow: 0 1px 0 rgba(255, 255, 255, .72); }
@@ -68,6 +71,11 @@ h3 { margin: 0; font-size: 15px; }
 .source-identity { min-width: 0; display: flex; align-items: center; gap: 11px; }
 .provider-icon { width: 36px; height: 36px; flex: 0 0 auto; display: grid; place-items: center; color: var(--accent); background: #fff; border: 1px solid #e3e1da; border-radius: 11px 11px 4px 11px; box-shadow: 0 2px 8px rgba(54, 60, 55, .045); font: 750 11px/1 "Cascadia Code", monospace; }
 .provider-icon.auto { background: var(--accent-soft); border-color: #d5e3d8; }
+.provider-link { position: relative; text-decoration: none; cursor: pointer; transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease; }
+.provider-link:hover { transform: translateY(-1px); border-color: #b8ccbd; box-shadow: 0 5px 14px rgba(48, 75, 57, .12); }
+.provider-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.provider-link[data-tooltip]::after { content: attr(data-tooltip); position: absolute; left: 0; bottom: calc(100% + 7px); z-index: 20; width: max-content; max-width: 180px; padding: 5px 8px; color: #fff; background: var(--ink); font-size: 11px; line-height: 1.25; opacity: 0; transform: translateY(3px); pointer-events: none; transition: opacity .12s ease, transform .12s ease; }
+.provider-link[data-tooltip]:hover::after, .provider-link[data-tooltip]:focus-visible::after { opacity: 1; transform: translateY(0); }
 .provider-icon svg { width: 23px; height: 23px; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; }
 .provider-icon img { width: 27px; height: 27px; display: block; object-fit: contain; }
 .source-identity strong, .source-identity small { display: block; }
@@ -82,6 +90,9 @@ h3 { margin: 0; font-size: 15px; }
 .source-health time { grid-column: 2; color: var(--faint); font-size: 10px; }
 .health-copy { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; font-weight: 650; white-space: nowrap; }
+.status.checking { color: #8b6c28; }
+.status.checking i { background: #c79a38; animation: health-pulse 1s ease-in-out infinite; }
+@keyframes health-pulse { 0%, 100% { opacity: .38; transform: scale(.82); } 50% { opacity: 1; transform: scale(1.08); } }
 .status i { width: 7px; height: 7px; background: currentColor; border-radius: 50%; }
 .status.healthy { color: #2c7546; }
 .status.unconfigured, .status.unchecked { color: var(--warning); }
