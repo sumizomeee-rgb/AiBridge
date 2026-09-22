@@ -11,6 +11,8 @@ AiBridge 是一个在本机运行、供局域网内 Agent 共用的 AI 网关。
 
 管理台只监听本机；网关只接受本机或私有网段客户端。首次使用请在管理台生成网关 Token。
 
+运行日志同时输出到启动窗口和 `server/data/logs/aibridge.log`。日志按 5 MB 滚动，最多保留 5 个历史文件；若服务异常退出，可从文件末尾查看最后一次错误及 traceback。
+
 ## 技术栈
 
 - 后端：Python 3.12、FastAPI、Uvicorn、HTTPX/HTTP2

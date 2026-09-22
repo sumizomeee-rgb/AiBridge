@@ -18,6 +18,9 @@ class Settings:
     admin_port: int = 7009
     database_path: Path = DATA_DIR / "aibridge.db"
     secret_key_path: Path = DATA_DIR / "secret.key"
+    log_path: Path = DATA_DIR / "logs" / "aibridge.log"
+    log_max_bytes: int = 5 * 1024 * 1024
+    log_backup_count: int = 5
 
 
 settings = Settings()
