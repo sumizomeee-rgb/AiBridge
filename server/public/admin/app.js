@@ -203,7 +203,7 @@ async function checkAllWebSources(force = false, silent = false) {
     button.disabled = false;
     button.classList.remove("checking");
     button.setAttribute("aria-busy", "false");
-    button.dataset.tooltip = "检测全部 Web 来源";
+    button.dataset.tooltip = "检测全部 Web 来源（会发送测试消息）";
     await load().catch(() => { /* 保留当前界面 */ });
   }
 }
@@ -517,9 +517,7 @@ $("#create-key").addEventListener("click", async () => {
 let initialLogsCollapsed = false;
 try { initialLogsCollapsed = localStorage.getItem("aibridge.logs.collapsed") === "1"; } catch { /* 浏览器禁用存储时默认展开 */ }
 setLogsCollapsed(initialLogsCollapsed, false);
-load()
-  .then(() => checkAllWebSources(false, true))
-  .catch((error) => toast(`无法加载控制台：${error.message}`, true));
+load().catch((error) => toast(`无法加载控制台：${error.message}`, true));
 setInterval(() => {
   if (document.hidden || $("#source-dialog").open || $("#token-dialog").open) return;
   load().catch(() => { /* 后台刷新失败时保留当前界面 */ });

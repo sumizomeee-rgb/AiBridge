@@ -17,9 +17,8 @@ def main() -> None:
             route.fulfill(status=200, content_type="application/json", body='{"running":false,"checked":0,"skipped":6,"results":[]}')
 
         page.route("**/api/web-sources/health", mock_web_health)
-        with page.expect_response(lambda response: response.url.endswith("/api/web-sources/health")):
-            page.goto("http://127.0.0.1:7009", wait_until="networkidle")
-        assert batch_calls == [{"force": False}]
+        page.goto("http://127.0.0.1:7009", wait_until="networkidle")
+        assert batch_calls == []
         assert page.title() == "AiBridge 控制台"
         assert page.locator('link[rel="icon"]').get_attribute("href") == "/assets/favicon.svg"
         assert page.locator("#lan-url").is_visible()
