@@ -134,9 +134,19 @@
   </dialog>
 
   <dialog id="token-dialog" class="token-dialog">
-    <div class="dialog-head"><div><p class="eyebrow">CREATED</p><h2>请立即复制 Token</h2></div><button class="icon-button" data-close-token>×</button></div>
-    <p>关闭后无法再次查看；遗失时请删除并重新生成。</p>
+    <div class="dialog-head"><div><p class="eyebrow">GATEWAY TOKEN</p><h2 id="token-dialog-title">网关 Token</h2></div><button class="icon-button" data-close-token>×</button></div>
+    <p>此 Token 已加密保存在本机，可随时在这里查看。请勿发给不信任的人。</p>
     <div class="secret"><code id="new-token"></code><button data-copy="new-token">复制</button></div>
+  </dialog>
+
+  <dialog id="token-import-dialog" class="token-dialog">
+    <form id="token-import-form">
+      <div class="dialog-head"><div><p class="eyebrow">EXISTING TOKEN</p><h2>补录已有 Token</h2></div><button type="button" class="icon-button" data-close-token-import>×</button></div>
+      <p id="token-import-name"></p>
+      <p>旧 Token 只保存了哈希，无法直接还原。粘贴原文后，网关会先核对，再加密保存供以后查看；客户端无需更换 Token。</p>
+      <input id="token-import-value" type="password" required autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="粘贴原 Token">
+      <div class="dialog-actions"><button type="button" class="quiet" data-close-token-import>取消</button><button type="submit" class="primary">核对并保存</button></div>
+    </form>
   </dialog>
 
   <div id="toast" role="status"></div>

@@ -77,6 +77,7 @@ class Storage:
                     prefix TEXT NOT NULL,
                     salt TEXT NOT NULL,
                     digest TEXT NOT NULL,
+                    secret_cipher TEXT,
                     enabled INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
                     last_used_at TEXT
@@ -127,6 +128,8 @@ class Storage:
                 );
                 """
             )
+            if "secret_cipher" not in {row["name"] for row in db.execute("PRAGMA table_info(gateway_keys)")}:
+                db.execute("ALTER TABLE gateway_keys ADD COLUMN secret_cipher TEXT")
             db.execute(
                 """INSERT OR IGNORE INTO catcher_settings(
                        id,enabled,auto_enable,allowed_sources_json,updated_at
@@ -576,15 +579,36 @@ class Storage:
     def create_key(self, name: str) -> tuple[dict[str, Any], str]:
         token = new_gateway_token()
         salt, digest = hash_token(token)
+        cipher = self.secrets.encrypt_json({"token": token})
         key_id = str(uuid.uuid4())
         stamp = now_iso()
         with self._connect() as db:
-            db.execute("INSERT INTO gateway_keys(id,name,prefix,salt,digest,created_at) VALUES(?,?,?,?,?,?)", (key_id, name.strip() or "未命名 Token", token[:11], salt, digest, stamp))
-        return {"id": key_id, "name": name.strip() or "未命名 Token", "prefix": token[:11], "enabled": True, "created_at": stamp, "last_used_at": None}, token
+            db.execute("INSERT INTO gateway_keys(id,name,prefix,salt,digest,secret_cipher,created_at) VALUES(?,?,?,?,?,?,?)", (key_id, name.strip() or "未命名 Token", token[:11], salt, digest, cipher, stamp))
+        return {"id": key_id, "name": name.strip() or "未命名 Token", "prefix": token[:11], "enabled": True, "revealable": True, "created_at": stamp, "last_used_at": None}, token
 
     def list_keys(self) -> list[dict[str, Any]]:
         with self._connect() as db:
-            return [dict(row) | {"enabled": bool(row["enabled"])} for row in db.execute("SELECT id,name,prefix,enabled,created_at,last_used_at FROM gateway_keys ORDER BY created_at DESC")]
+            return [dict(row) | {"enabled": bool(row["enabled"]), "revealable": bool(row["revealable"])} for row in db.execute("SELECT id,name,prefix,enabled,created_at,last_used_at,secret_cipher IS NOT NULL AS revealable FROM gateway_keys ORDER BY created_at DESC")]
+
+    def get_key_token(self, key_id: str) -> str | None:
+        with self._connect() as db:
+            row = db.execute("SELECT secret_cipher FROM gateway_keys WHERE id=?", (key_id,)).fetchone()
+        if not row:
+            raise KeyError(key_id)
+        token = self.secrets.decrypt_json(row["secret_cipher"]).get("token")
+        return token if isinstance(token, str) else None
+
+    def save_existing_key_token(self, key_id: str, token: str) -> None:
+        with self._connect() as db:
+            row = db.execute("SELECT salt,digest FROM gateway_keys WHERE id=?", (key_id,)).fetchone()
+            if not row:
+                raise KeyError(key_id)
+            if not isinstance(token, str) or not token or not verify_token(token, row["salt"], row["digest"]):
+                raise ValueError("Token 与现有记录不匹配")
+            db.execute(
+                "UPDATE gateway_keys SET secret_cipher=? WHERE id=?",
+                (self.secrets.encrypt_json({"token": token}), key_id),
+            )
 
     def verify_key(self, token: str) -> bool:
         if not token:

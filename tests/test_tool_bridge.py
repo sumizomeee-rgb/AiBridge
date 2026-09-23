@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
 from aibridge.protocols import (  # noqa: E402
     CanonicalEvent,
     WEB_PROMPT_MAX_CHARS,
+    anthropic_sse,
     from_anthropic,
     from_openai,
     flatten_web_prompt,
@@ -19,7 +20,7 @@ from aibridge.protocols import (  # noqa: E402
     to_anthropic_upstream,
     to_openai_upstream,
 )
-from aibridge.providers import _bridge_web_tools  # noqa: E402
+from aibridge.providers import ProviderError, _bridge_web_tools  # noqa: E402
 
 
 TOOLS = [
@@ -139,6 +140,83 @@ class ToolBridgeTests(unittest.TestCase):
         visible, calls = parse_web_tool_response(raw, TOOLS)
         self.assertEqual([], calls)
         self.assertEqual(raw, visible)
+
+    def test_longcat_native_tool_calls_become_real_calls(self) -> None:
+        bash = {
+            "name": "Bash",
+            "input_schema": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}, "description": {"type": "string"}},
+                "required": ["command"],
+            },
+        }
+        raw = (
+            "Let me check the directory."
+            '<longcat_tool_call>Bash\ncommand: ls -la "G:/SuchProject/Other/ssh-tunnel-proxy/bat/lan-share" '
+            '&& cat "G:/SuchProject/Other/ssh-tunnel-proxy/bat/lan-share/"*.bat 2>/dev/null\n'
+            "description: List files and show content of bat scripts in lan-share directory\n"
+            "</longcat_tool_call>\n"
+            '<longcat_tool_call>Bash\ncommand: reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" '
+            '2>/dev/null | grep -i "lan-share|ssh-tunnel|lan.share"\n'
+            "description: Check Windows startup registry entries for lan-share\n"
+            "</longcat_tool_call>"
+        )
+
+        visible, calls = parse_web_tool_response(raw, [bash], "longcat")
+
+        self.assertEqual("Let me check the directory.", visible)
+        self.assertEqual(2, len(calls))
+        self.assertEqual(["Bash", "Bash"], [call["function"]["name"] for call in calls])
+        self.assertIn("ls -la", json.loads(calls[0]["function"]["arguments"])["command"])
+        self.assertIn("reg query", json.loads(calls[1]["function"]["arguments"])["command"])
+
+    def test_longcat_native_tool_call_stays_text_for_other_sources_or_missing_arguments(self) -> None:
+        bash = {
+            "name": "Bash",
+            "input_schema": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            },
+        }
+        raw = "<longcat_tool_call>Bash\ncommand: pwd\n</longcat_tool_call>"
+        self.assertEqual((raw, []), parse_web_tool_response(raw, [bash]))
+        malformed = "<longcat_tool_call>Bash\ndescription: no command\n</longcat_tool_call>"
+        self.assertEqual((malformed, []), parse_web_tool_response(malformed, [bash], "longcat"))
+
+    def test_longcat_native_tool_call_keeps_multiline_command(self) -> None:
+        bash = {
+            "name": "Bash",
+            "input_schema": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}, "description": {"type": "string"}},
+                "required": ["command"],
+            },
+        }
+        raw = "<longcat_tool_call>Bash\ncommand: echo first\n  && echo second\ndescription: two commands\n</longcat_tool_call>"
+
+        visible, calls = parse_web_tool_response(raw, [bash], "longcat")
+
+        self.assertEqual("", visible)
+        self.assertEqual("echo first\n  && echo second", json.loads(calls[0]["function"]["arguments"])["command"])
+
+    def test_common_and_source_tool_calls_keep_response_order(self) -> None:
+        bash = {
+            "name": "Bash",
+            "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
+        }
+        raw = (
+            "<longcat_tool_call>Bash\ncommand: pwd\n</longcat_tool_call>\n"
+            '<aibridge_tool_call>{"name":"Bash","arguments":{"command":"echo second"}}</aibridge_tool_call>'
+        )
+
+        visible, calls = parse_web_tool_response(raw, [bash], "longcat")
+
+        self.assertEqual("", visible)
+        self.assertEqual(
+            ["pwd", "echo second"],
+            [json.loads(call["function"]["arguments"])["command"] for call in calls],
+        )
 
     def test_long_latest_message_is_preserved_once_without_gateway_truncation(self) -> None:
         body = "TASK-AT-START\n" + ("runtime metadata " * 6000) + "\nRECENT-TAIL"
@@ -273,6 +351,22 @@ class ToolBridgeTests(unittest.TestCase):
 
 
 class AsyncToolBridgeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_malformed_tool_call_is_reported_without_executing_it(self) -> None:
+        async def source():
+            yield CanonicalEvent("text", text='<aibridge_tool_call>{"name":"write_file","arguments":{"path":"a.txt","content":"ok"}}}</aibridge_tool_call>')
+
+        req = from_anthropic({"model": "web-auto", "messages": [], "tools": TOOLS}, "auto")
+        with self.assertRaisesRegex(ProviderError, "工具未执行"):
+            _ = [event async for event in _bridge_web_tools(source(), req)]
+
+    async def test_ordinary_text_is_not_judged_as_failed_tool_call(self) -> None:
+        async def source():
+            yield CanonicalEvent("text", text="The path is unavailable, so I cannot confirm whether it starts automatically.")
+
+        req = from_anthropic({"model": "web-auto", "messages": [], "tools": TOOLS}, "auto")
+        events = [event async for event in _bridge_web_tools(source(), req)]
+        self.assertEqual(["text"], [event.type for event in events])
+
     async def test_web_event_stream_becomes_tool_event(self) -> None:
         async def source():
             yield CanonicalEvent("reasoning", reasoning="thinking")
@@ -284,6 +378,29 @@ class AsyncToolBridgeTests(unittest.IsolatedAsyncioTestCase):
         events = [event async for event in _bridge_web_tools(source(), req)]
         self.assertEqual(["reasoning", "usage", "tool"], [event.type for event in events])
         self.assertEqual("write_file", events[-1].tool["function"]["name"])
+
+    async def test_longcat_native_call_reaches_anthropic_tool_use(self) -> None:
+        bash = {
+            "name": "Bash",
+            "input_schema": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}, "description": {"type": "string"}},
+                "required": ["command"],
+            },
+        }
+
+        async def source():
+            yield CanonicalEvent("text", text="<longcat_tool_call>Bash\ncommand: pwd\n")
+            yield CanonicalEvent("text", text="description: Inspect current directory\n</longcat_tool_call>")
+
+        req = from_anthropic({"model": "web-auto", "messages": [], "tools": [bash]}, "auto")
+        chunks = [chunk async for chunk in anthropic_sse(_bridge_web_tools(source(), req, "longcat"), "msg_test", "web-auto")]
+        output = b"".join(chunks).decode()
+
+        self.assertIn('"type":"tool_use"', output)
+        self.assertIn('"name":"Bash"', output)
+        self.assertIn('"stop_reason":"tool_use"', output)
+        self.assertNotIn("longcat_tool_call", output)
 
 
 if __name__ == "__main__":

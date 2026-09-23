@@ -114,7 +114,13 @@ function renderSources() {
 }
 
 function renderKeys() {
-  $("#keys").innerHTML = state.keys.length ? state.keys.map((key) => `<div class="list-row"><div><strong>${escapeHtml(key.name)}</strong><br><code>${escapeHtml(key.prefix)}••••••••</code></div><small>${key.last_used_at ? `最后使用 ${escapeHtml(formatTime(key.last_used_at))}` : "尚未使用"}</small><button class="icon-action danger" data-key-delete="${escapeHtml(key.id)}" data-tooltip="删除 Token" aria-label="删除 Token">${icons.trash}</button></div>`).join("") : `<div class="empty">尚未生成网关 Token</div>`;
+  $("#keys").innerHTML = state.keys.length ? state.keys.map((key) => `<div class="list-row"><div><strong>${escapeHtml(key.name)}</strong><br><code>${escapeHtml(key.prefix)}••••••••</code></div><small>${key.last_used_at ? `最后使用 ${escapeHtml(formatTime(key.last_used_at))}` : "尚未使用"}</small><div class="key-actions"><button data-${key.revealable ? "key-view" : "key-import"}="${escapeHtml(key.id)}" aria-label="${key.revealable ? "查看" : "补录"} ${escapeHtml(key.name)} Token">${key.revealable ? "查看 / 复制" : "补录原文"}</button><button class="icon-action danger" data-key-delete="${escapeHtml(key.id)}" data-tooltip="删除 Token" aria-label="删除 Token">${icons.trash}</button></div></div>`).join("") : `<div class="empty">尚未生成网关 Token</div>`;
+}
+
+function showToken(token, title) {
+  $("#token-dialog-title").textContent = title;
+  $("#new-token").textContent = token;
+  $("#token-dialog").showModal();
 }
 
 function renderCatcher() {
@@ -417,10 +423,27 @@ document.addEventListener("click", async (event) => {
   const close = event.target.closest("[data-close]");
   if (close) return $("#source-dialog").close();
   if (event.target.closest("[data-close-token]")) return $("#token-dialog").close();
+  if (event.target.closest("[data-close-token-import]")) return $("#token-import-dialog").close();
   const copy = event.target.closest("[data-copy]");
   if (copy) {
     await navigator.clipboard.writeText(document.getElementById(copy.dataset.copy).textContent);
     return toast("已复制到剪贴板");
+  }
+  const keyView = event.target.closest("[data-key-view]");
+  if (keyView) {
+    try {
+      const key = state.keys.find((item) => item.id === keyView.dataset.keyView);
+      const result = await api(`/api/keys/${keyView.dataset.keyView}/token`);
+      return showToken(result.token, `${key?.name || "网关"} Token`);
+    } catch (error) { return toast(error.message, true); }
+  }
+  const keyImport = event.target.closest("[data-key-import]");
+  if (keyImport) {
+    const key = state.keys.find((item) => item.id === keyImport.dataset.keyImport);
+    $("#token-import-form").dataset.keyId = keyImport.dataset.keyImport;
+    $("#token-import-name").textContent = key?.name || "旧 Token";
+    $("#token-import-value").value = "";
+    return $("#token-import-dialog").showModal();
   }
   const keyDelete = event.target.closest("[data-key-delete]");
   if (keyDelete) {
@@ -509,18 +532,33 @@ $("#logs-toggle").addEventListener("click", () => setLogsCollapsed(!$("#logs-con
 $("#create-key").addEventListener("click", async () => {
   try {
     const result = await api("/api/keys", { method: "POST", body: JSON.stringify({ name: $("#key-name").value.trim() || "本地 Token" }) });
-    $("#new-token").textContent = result.token;
-    $("#token-dialog").showModal();
+    showToken(result.token, `新建 ${result.key.name} Token`);
     $("#key-name").value = "";
     await load();
   } catch (error) { toast(error.message, true); }
 });
+
+$("#token-import-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector('[type="submit"]');
+  button.disabled = true;
+  try {
+    await api(`/api/keys/${form.dataset.keyId}/token`, { method: "PUT", body: JSON.stringify({ token: $("#token-import-value").value.trim() }) });
+    $("#token-import-dialog").close();
+    toast("旧 Token 已核对并加密保存");
+    await load();
+  } catch (error) { toast(error.message, true); }
+  finally { button.disabled = false; }
+});
+$("#token-dialog").addEventListener("close", () => { $("#new-token").textContent = ""; });
+$("#token-import-dialog").addEventListener("close", () => { $("#token-import-value").value = ""; });
 
 let initialLogsCollapsed = false;
 try { initialLogsCollapsed = localStorage.getItem("aibridge.logs.collapsed") === "1"; } catch { /* 浏览器禁用存储时默认展开 */ }
 setLogsCollapsed(initialLogsCollapsed, false);
 load().catch((error) => toast(`无法加载控制台：${error.message}`, true));
 setInterval(() => {
-  if (document.hidden || $("#source-dialog").open || $("#token-dialog").open) return;
+  if (document.hidden || $("#source-dialog").open || $("#token-dialog").open || $("#token-import-dialog").open) return;
   load().catch(() => { /* 后台刷新失败时保留当前界面 */ });
 }, 3000);

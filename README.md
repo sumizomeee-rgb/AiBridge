@@ -31,6 +31,8 @@ AiBridge 是一个在本机运行、供局域网内 Agent 共用的 AI 网关。
 
 Token 既可放在 `Authorization: Bearer ...`，也可放在 Anthropic 常用的 `x-api-key`。模型名使用管理台中的“公开模型名”，客户端不需要知道上游来源。
 
+新建的网关 Token 会加密保存在本机，可在管理台反复查看和复制。旧版 Token 原文无法从哈希还原；若仍持有原文，可在管理台补录并核对，之后同样可查看，原有客户端无需更换 Token。
+
 ## 来源类型
 
 - Web：DeepSeek、千问、豆包、Kimi、Perplexity、文心、LongCat、MiMo 等。每个来源对外暴露一个可编辑模型名。Cookie/cURL 只加密保存在 `server/data`，不会写入 Git。LongCat 使用已配对的 AiBridge Catcher 在官网页面中实时生成安全签名，调用期间需要保持 `longcat.chat` 页面打开；MiMo 同样通过已登录的官网页面中继请求，使用期间需要保持 MiMo 页面打开。
@@ -50,7 +52,7 @@ Token 既可放在 `Authorization: Bearer ...`，也可放在 Anthropic 常用�
 
 Web 来源会压缩 Claude Code 等 Agent 注入的大段系统提示与工具 schema，并通过网关工具桥还原 OpenAI `tool_calls` 和 Anthropic `tool_use`。桥接支持工具结果回送与 DeepSeek Web 的 DSML 调用格式，已可完成多轮本地工具任务；但官网协议随时可能变化，可靠性仍低于原生标准 API。
 
-Web 工具方言按来源隔离：DeepSeek Web 才解析 DSML，豆包与千问只解析网关标准标签。自定义 API 来源不进入 Web 工具桥，也不做跨协议伪装：OpenAI API 条目使用 `/v1/chat/completions`，Anthropic API 条目使用 `/v1/messages`。
+Web 工具调用先按网关标准标签解析，再按来源解析专属格式：DeepSeek Web 支持 DSML，LongCat 支持 `<longcat_tool_call>`；豆包与千问使用网关标准标签。自定义 API 来源不进入 Web 工具桥，也不做跨协议伪装：OpenAI API 条目使用 `/v1/chat/completions`，Anthropic API 条目使用 `/v1/messages`。
 
 ## Web 来源开发约定
 

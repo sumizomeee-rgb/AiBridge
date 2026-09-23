@@ -6,7 +6,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 
 WEB_PROMPT_MAX_CHARS = 120_000
@@ -535,6 +535,8 @@ _WEB_TOOL_TAG = re.compile(
     r"<(?:aibridge_)?tool_call>\s*(.*?)\s*</(?:aibridge_)?tool_call>",
     re.IGNORECASE | re.DOTALL,
 )
+_LONGCAT_TOOL_TAG = re.compile(r"<longcat_tool_call>\s*(.*?)\s*</longcat_tool_call>", re.IGNORECASE | re.DOTALL)
+_LONGCAT_TOOL_FIELD = re.compile(r"^([A-Za-z][\w-]*):[ \t]*(.*)$")
 _DSML_MARKER = r"(?:\|\||｜｜)DSML(?:\|\||｜｜)"
 _DSML_CALLS = re.compile(
     rf"<\s*{_DSML_MARKER}\s+calls\s*>(.*?)</\s*{_DSML_MARKER}\s+calls\s*>",
@@ -589,6 +591,35 @@ def _tool_call_from_payload(payload: dict[str, Any], allowed: set[str]) -> dict[
     }
 
 
+def _decode_longcat_tool_call(raw: str, tools_by_name: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    lines = raw.strip().splitlines()
+    if not lines:
+        return None
+    name = lines[0].strip()
+    tool = tools_by_name.get(name)
+    if tool is None:
+        return None
+    schema = tool.get("input_schema") or {}
+    properties = schema.get("properties") if isinstance(schema, dict) else {}
+    allowed_fields = set(properties) if isinstance(properties, dict) else set()
+    arguments: dict[str, str] = {}
+    current_field: str | None = None
+    for line in lines[1:]:
+        field = _LONGCAT_TOOL_FIELD.match(line)
+        if field and field.group(1) in allowed_fields:
+            current_field = field.group(1)
+            arguments[current_field] = field.group(2)
+        elif current_field is not None:
+            arguments[current_field] += "\n" + line
+        elif line.strip():
+            return None
+    arguments = {key: value.strip() for key, value in arguments.items()}
+    required = schema.get("required") if isinstance(schema, dict) else []
+    if not arguments or any(not arguments.get(key) for key in required or []):
+        return None
+    return _tool_call_from_payload({"name": name, "arguments": arguments}, set(tools_by_name))
+
+
 def _attributes(raw: str) -> dict[str, str]:
     return {match.group(1): html.unescape(match.group(3)) for match in _XML_ATTRIBUTE.finditer(raw)}
 
@@ -620,6 +651,63 @@ def _decode_dsml_calls(raw: str, allowed: set[str]) -> list[dict[str, Any]]:
     return calls
 
 
+ToolMatch = tuple[tuple[int, int], dict[str, Any]]
+ToolParser = Callable[[str, list[dict[str, Any]]], list[ToolMatch]]
+
+
+def _parse_standard_tool_calls(text: str, tools: list[dict[str, Any]]) -> list[ToolMatch]:
+    allowed = {str(tool["name"]) for tool in tools if tool.get("name")}
+    matches: list[ToolMatch] = []
+    for match in _WEB_TOOL_TAG.finditer(text):
+        for payload in _decode_tool_payload(match.group(1)):
+            call = _tool_call_from_payload(payload, allowed)
+            if call:
+                matches.append((match.span(), call))
+    return matches
+
+
+def _parse_longcat_tool_calls(text: str, tools: list[dict[str, Any]]) -> list[ToolMatch]:
+    tools_by_name = {str(tool["name"]): tool for tool in tools if tool.get("name")}
+    matches: list[ToolMatch] = []
+    for match in _LONGCAT_TOOL_TAG.finditer(text):
+        call = _decode_longcat_tool_call(match.group(1), tools_by_name)
+        if call:
+            matches.append((match.span(), call))
+    return matches
+
+
+def _parse_deepseek_tool_calls(text: str, tools: list[dict[str, Any]]) -> list[ToolMatch]:
+    allowed = {str(tool["name"]) for tool in tools if tool.get("name")}
+    matches: list[ToolMatch] = []
+    for match in _DSML_CALLS.finditer(text):
+        matches.extend((match.span(), call) for call in _decode_dsml_calls(match.group(1), allowed))
+    if not matches:
+        matches.extend(
+            (match.span(), call)
+            for match in _DSML_INVOKE.finditer(text)
+            for call in _decode_dsml_calls(match.group(0), allowed)
+        )
+    return matches
+
+
+_WEB_SOURCE_TOOL_ADAPTERS: dict[str, ToolParser] = {
+    "deepseek": _parse_deepseek_tool_calls,
+    "longcat": _parse_longcat_tool_calls,
+}
+
+
+def is_unparsed_web_tool_call(text: str, dialect: str = "standard") -> bool:
+    """Only flag a reply that consists entirely of an unparsed tool-call tag."""
+    stripped = text.strip()
+    if _WEB_TOOL_TAG.fullmatch(stripped):
+        return True
+    if dialect == "longcat" and _LONGCAT_TOOL_TAG.fullmatch(stripped):
+        return True
+    return dialect == "deepseek" and bool(
+        _DSML_CALLS.fullmatch(stripped) or _DSML_INVOKE.fullmatch(stripped)
+    )
+
+
 def parse_web_tool_response(
     text: str,
     tools: list[dict[str, Any]],
@@ -628,32 +716,12 @@ def parse_web_tool_response(
     """按来源方言把网页回复解析为内部 OpenAI 形态的工具调用。"""
     if not tools:
         return text, []
-    allowed = {str(tool.get("name")) for tool in tools if tool.get("name")}
-    parsed: list[dict[str, Any]] = []
-    consumed: list[tuple[int, int]] = []
-    for match in _WEB_TOOL_TAG.finditer(text):
-        payloads = _decode_tool_payload(match.group(1))
-        accepted = False
-        for payload in payloads:
-            call = _tool_call_from_payload(payload, allowed)
-            if call:
-                parsed.append(call)
-                accepted = True
-        if accepted:
-            consumed.append(match.span())
-
-    if dialect == "deepseek":
-        for match in _DSML_CALLS.finditer(text):
-            calls = _decode_dsml_calls(match.group(1), allowed)
-            if calls:
-                parsed.extend(calls)
-                consumed.append(match.span())
-
-        if not parsed:
-            calls = _decode_dsml_calls(text, allowed)
-            if calls:
-                parsed.extend(calls)
-                consumed.extend(match.span() for match in _DSML_INVOKE.finditer(text))
+    matches = _parse_standard_tool_calls(text, tools)
+    adapter = _WEB_SOURCE_TOOL_ADAPTERS.get(dialect)
+    if adapter:
+        matches.extend(adapter(text, tools))
+    matches.sort(key=lambda item: item[0][0])
+    parsed = [call for _, call in matches]
 
     if not parsed:
         stripped = text.strip()
@@ -667,7 +735,7 @@ def parse_web_tool_response(
             return parse_web_tool_response(synthetic, tools, dialect)
 
     visible = text
-    for start, end in reversed(consumed):
+    for start, end in sorted({span for span, _ in matches}, reverse=True):
         visible = visible[:start] + visible[end:]
     visible = re.sub(r"\n{3,}", "\n\n", visible).strip()
     return visible, parsed

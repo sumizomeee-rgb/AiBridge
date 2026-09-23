@@ -22,7 +22,7 @@ try:
 except (ImportError, OSError):
     CurlAsyncSession = None
 
-from .protocols import CanonicalEvent, CanonicalRequest, flatten_web_prompt, parse_web_tool_response, to_anthropic_upstream, to_openai_upstream, web_tool_bridge_enabled
+from .protocols import CanonicalEvent, CanonicalRequest, flatten_web_prompt, is_unparsed_web_tool_call, parse_web_tool_response, to_anthropic_upstream, to_openai_upstream, web_tool_bridge_enabled
 from .relay import RelayError, relay_broker
 
 
@@ -1229,6 +1229,8 @@ async def _bridge_web_tools(
         else:
             yield event
     visible, tool_calls = parse_web_tool_response("".join(text_parts), req.tools, dialect)
+    if not tool_calls and is_unparsed_web_tool_call(visible, dialect):
+        raise ProviderError("Web 来源返回的工具调用格式无效，工具未执行", "tool_call_invalid")
     if visible:
         yield CanonicalEvent("text", text=visible)
     for tool in tool_calls:
@@ -1261,7 +1263,7 @@ def stream_source(source: dict[str, Any], req: CanonicalRequest) -> AsyncIterato
         dialect = "standard"
     elif protocol == "longcat_web":
         events = _stream_longcat(source, req)
-        dialect = "standard"
+        dialect = "longcat"
     elif protocol == "mimo_web":
         events = _stream_mimo(source, req)
         dialect = "standard"

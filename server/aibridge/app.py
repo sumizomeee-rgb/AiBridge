@@ -86,6 +86,13 @@ def _loopback_client(host: str | None) -> bool:
         return False
 
 
+def _local_key_admin(request: Request) -> bool:
+    if not _loopback_client(request.client.host if request.client else None):
+        return False
+    origin = request.headers.get("origin")
+    return not origin or origin in {f"http://127.0.0.1:{settings.admin_port}", f"http://localhost:{settings.admin_port}"}
+
+
 def _openai_error(message: str, status: int = 400, code: str = "invalid_request_error") -> JSONResponse:
     return JSONResponse({"error": {"message": message, "type": code, "param": None, "code": code}}, status_code=status)
 
@@ -412,12 +419,43 @@ def create_admin_app() -> FastAPI:
 
     @app.post("/api/keys")
     async def create_key(request: Request):
+        if not _local_key_admin(request):
+            raise HTTPException(403, "Token 管理仅允许在本机管理台操作")
         body = await request.json()
         item, token = storage.create_key(body.get("name", "本地 Token"))
-        return {"key": item, "token": token, "notice": "Token 仅显示这一次，请立即复制保存。"}
+        return JSONResponse({"key": item, "token": token}, headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/keys/{key_id}/token")
+    async def reveal_key(request: Request, key_id: str):
+        if not _local_key_admin(request):
+            raise HTTPException(403, "Token 管理仅允许在本机管理台操作")
+        try:
+            token = storage.get_key_token(key_id)
+        except KeyError:
+            raise HTTPException(404, "Token 不存在") from None
+        if token is None:
+            raise HTTPException(409, "旧 Token 尚未补录原文，无法查看")
+        return JSONResponse({"token": token}, headers={"Cache-Control": "no-store"})
+
+    @app.put("/api/keys/{key_id}/token")
+    async def save_key_token(request: Request, key_id: str):
+        if not _local_key_admin(request):
+            raise HTTPException(403, "Token 管理仅允许在本机管理台操作")
+        body = await request.json()
+        if not isinstance(body, dict) or not isinstance(body.get("token"), str):
+            raise HTTPException(400, "请提供 Token 原文")
+        try:
+            storage.save_existing_key_token(key_id, body["token"])
+        except KeyError:
+            raise HTTPException(404, "Token 不存在") from None
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"ok": True}
 
     @app.delete("/api/keys/{key_id}")
-    async def delete_key(key_id: str):
+    async def delete_key(request: Request, key_id: str):
+        if not _local_key_admin(request):
+            raise HTTPException(403, "Token 管理仅允许在本机管理台操作")
         storage.delete_key(key_id)
         return {"ok": True}
 

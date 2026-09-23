@@ -196,6 +196,8 @@ textarea { resize: vertical; font-family: "Cascadia Code", Consolas, monospace; 
 .access-block > .list { padding: 0 14px; }
 .list-row { display: grid; grid-template-columns: 1fr auto auto; gap: 15px; align-items: center; padding: 9px 0; border-top: 1px solid var(--line); }
 .list-row code, .list-row small { color: var(--muted); }
+.key-actions { display: flex; align-items: center; gap: 8px; }
+.key-actions > button:first-child { white-space: nowrap; }
 
 .logs-block { overflow: hidden; border: 1px solid rgba(220, 212, 201, .9); border-radius: 18px; background: rgba(255, 253, 249, .94); box-shadow: var(--shadow-soft); }
 .logs-block .section-head { margin: 0; padding: 15px 15px 13px; }
