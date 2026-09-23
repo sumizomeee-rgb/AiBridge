@@ -326,6 +326,14 @@ class WebRouter:
         context.queue_ms += int((time.perf_counter() - started) * 1000)
         context.lease = holder["lease"]
 
+    @staticmethod
+    async def _release_acquire_task(task: asyncio.Task[SourceLease]) -> None:
+        if not task.done():
+            task.cancel()
+        result = await asyncio.gather(task, return_exceptions=True)
+        if result and isinstance(result[0], SourceLease):
+            await result[0].release()
+
     async def stream(
         self,
         source: dict[str, Any],
@@ -340,13 +348,13 @@ class WebRouter:
 
         if source.get("protocol") != AUTO_SOURCE_PROTOCOL:
             task = asyncio.create_task(self.scheduler.acquire(source["id"], source_concurrency(source)))
-            async for heartbeat in self._acquire_with_heartbeats(task, context):
-                yield heartbeat
-            lease = context.lease
-            if lease is None:
-                raise ProviderError("来源并发调度失败", "scheduler_error", 500)
-            context.actual_source = source
             try:
+                async for heartbeat in self._acquire_with_heartbeats(task, context):
+                    yield heartbeat
+                lease = context.lease
+                if lease is None:
+                    raise ProviderError("来源并发调度失败", "scheduler_error", 500)
+                context.actual_source = source
                 await self._prepare_source(source)
                 async for event in self.stream_factory(source, req):
                     yield event
@@ -354,7 +362,7 @@ class WebRouter:
                 self._record_source_failure(source, exc)
                 raise
             finally:
-                await lease.release()
+                await self._release_acquire_task(task)
             return
 
         routing_mode, dispatch_mode = self.routing_settings()
@@ -372,45 +380,48 @@ class WebRouter:
             candidate_limits = [(item["id"], source_concurrency(item)) for item in candidates]
             acquire = self.scheduler.acquire_balanced(candidate_limits) if dispatch_mode == AUTO_DISPATCH_BALANCED else self.scheduler.acquire_first(candidate_limits)
             task = asyncio.create_task(acquire)
-            async for heartbeat in self._acquire_with_heartbeats(task, context):
-                yield heartbeat
-            lease = context.lease
-            if lease is None:
-                raise ProviderError("WebAuto 并发调度失败", "scheduler_error", 500)
-            candidate = next(item for item in candidates if item["id"] == lease.source_id)
-            context.actual_source = candidate
-            candidate_req = replace(req, upstream_model=candidate["route_model"]["upstream_name"])
-            stream_task: asyncio.Task[list[CanonicalEvent]] | None = None
-            buffered: list[CanonicalEvent] = []
             try:
-                await self._prepare_source(candidate)
-                async def collect_candidate() -> list[CanonicalEvent]:
-                    return [
-                        event
-                        async for event in self.stream_factory(candidate, candidate_req)
-                        if event.type != "keepalive"
-                    ]
+                async for heartbeat in self._acquire_with_heartbeats(task, context):
+                    yield heartbeat
+                lease = context.lease
+                if lease is None:
+                    raise ProviderError("WebAuto 并发调度失败", "scheduler_error", 500)
+                candidate = next(item for item in candidates if item["id"] == lease.source_id)
+                context.actual_source = candidate
+                candidate_req = replace(req, upstream_model=candidate["route_model"]["upstream_name"])
+                stream_task: asyncio.Task[list[CanonicalEvent]] | None = None
+                buffered: list[CanonicalEvent] = []
+                try:
+                    await self._prepare_source(candidate)
+                    async def collect_candidate() -> list[CanonicalEvent]:
+                        return [
+                            event
+                            async for event in self.stream_factory(candidate, candidate_req)
+                            if event.type != "keepalive"
+                        ]
 
-                stream_task = asyncio.create_task(collect_candidate())
-                while not stream_task.done():
-                    done, _ = await asyncio.wait({stream_task}, timeout=self.keepalive_seconds)
-                    if not done:
-                        yield CanonicalEvent("keepalive")
-                buffered = await stream_task
-            except Exception as exc:
-                self._record_source_failure(candidate, exc)
-                if custom_mode:
-                    raise
-                excluded.add(candidate["id"])
-                context.fallback_errors.append(f"{candidate['name']}：{str(exc)[:120]}")
+                    stream_task = asyncio.create_task(collect_candidate())
+                    while not stream_task.done():
+                        done, _ = await asyncio.wait({stream_task}, timeout=self.keepalive_seconds)
+                        if not done:
+                            yield CanonicalEvent("keepalive")
+                    buffered = await stream_task
+                except Exception as exc:
+                    self._record_source_failure(candidate, exc)
+                    if custom_mode:
+                        raise
+                    excluded.add(candidate["id"])
+                    context.fallback_errors.append(f"{candidate['name']}：{str(exc)[:120]}")
+                finally:
+                    if stream_task is not None and not stream_task.done():
+                        stream_task.cancel()
+                        await asyncio.gather(stream_task, return_exceptions=True)
+                    await lease.release()
+                if buffered:
+                    for event in buffered:
+                        yield event
+                    return
+                if stream_task is not None and stream_task.done() and stream_task.exception() is None:
+                    return
             finally:
-                if stream_task is not None and not stream_task.done():
-                    stream_task.cancel()
-                    await asyncio.gather(stream_task, return_exceptions=True)
-                await lease.release()
-            if buffered:
-                for event in buffered:
-                    yield event
-                return
-            if stream_task is not None and stream_task.done() and stream_task.exception() is None:
-                return
+                await self._release_acquire_task(task)

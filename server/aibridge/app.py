@@ -8,6 +8,7 @@ import time
 import uuid
 from typing import Any, AsyncIterator, Callable
 
+import anyio
 import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,6 +36,17 @@ from .storage import Storage
 storage = Storage(settings.database_path, settings.secret_key_path)
 source_scheduler = SourceScheduler()
 web_router = WebRouter(storage, source_scheduler)
+
+
+class ClosingStreamingResponse(StreamingResponse):
+    async def stream_response(self, send: Callable) -> None:
+        try:
+            await super().stream_response(send)
+        finally:
+            close = getattr(self.body_iterator, "aclose", None)
+            if close is not None:
+                with anyio.CancelScope(shield=True):
+                    await close()
 
 
 def _lan_ip() -> str:
@@ -161,11 +173,15 @@ def create_gateway_app() -> FastAPI:
             status = "ok"
             error = None
             route = RouteContext(source)
+            events = None
+            translated = None
+            completed = False
             try:
                 events = web_router.stream(source, canonical, route)
                 translated = openai_sse(events, request_id, public_model) if protocol == "openai" else anthropic_sse(events, request_id, public_model)
                 async for chunk in translated:
                     yield chunk
+                completed = True
             except Exception as exc:
                 status, error = "error", str(exc)
                 if protocol == "openai":
@@ -174,6 +190,14 @@ def create_gateway_app() -> FastAPI:
                 else:
                     yield sse({"type": "error", "error": {"type": getattr(exc, "status", "api_error"), "message": str(exc)}}, "error")
             finally:
+                if not completed and status == "ok":
+                    status = "cancelled"
+                try:
+                    if translated is not None:
+                        await translated.aclose()
+                finally:
+                    if events is not None:
+                        await events.aclose()
                 if status == "ok":
                     actual = route.actual_source or source
                     if actual.get("kind") == "web":
@@ -181,7 +205,7 @@ def create_gateway_app() -> FastAPI:
                 detail = " · ".join(item for item in (route.note, error) if item)
                 storage.add_log(request_id, route.source_label, public_model, protocol, status, int((time.perf_counter() - started) * 1000), detail)
 
-        return StreamingResponse(output(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        return ClosingStreamingResponse(output(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     @app.post("/v1/chat/completions")
     @app.post("/chat/completions")

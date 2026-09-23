@@ -184,6 +184,65 @@ class WebRouterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(selected, ["web-deepseek", "web-qwen", "web-doubao", "web-deepseek"])
 
+    async def test_auto_releases_source_when_client_closes_during_upstream_call(self) -> None:
+        storage = FakeStorage()
+        cancelled = asyncio.Event()
+
+        async def slow_stream(source: dict, request: CanonicalRequest):
+            try:
+                await asyncio.Event().wait()
+                yield CanonicalEvent("text", text="unreachable")
+            finally:
+                cancelled.set()
+
+        router = WebRouter(storage, SourceScheduler(), slow_stream, keepalive_seconds=0.005)
+        auto = storage.sources[0]
+        request = CanonicalRequest(model="web-auto", upstream_model="auto", messages=[])
+        events = router.stream(auto, request, RouteContext(auto))
+
+        self.assertEqual((await asyncio.wait_for(anext(events), timeout=1)).type, "keepalive")
+        self.assertEqual(router.scheduler.snapshot()["active"], {"web-deepseek": 1})
+        await asyncio.wait_for(events.aclose(), timeout=1)
+
+        self.assertTrue(cancelled.is_set())
+        self.assertEqual(router.scheduler.snapshot()["active"], {})
+
+    async def test_auto_cancels_pending_acquire_when_client_closes(self) -> None:
+        storage = FakeStorage()
+        router = WebRouter(storage, SourceScheduler(), keepalive_seconds=0.005)
+        held = [
+            await router.scheduler.acquire(source_id, 3)
+            for source_id in ("web-deepseek", "web-qwen", "web-doubao")
+            for _ in range(3)
+        ]
+        auto = storage.sources[0]
+        request = CanonicalRequest(model="web-auto", upstream_model="auto", messages=[])
+        events = router.stream(auto, request, RouteContext(auto))
+
+        self.assertEqual((await asyncio.wait_for(anext(events), timeout=1)).type, "keepalive")
+        await asyncio.wait_for(events.aclose(), timeout=1)
+
+        self.assertEqual(router.scheduler.snapshot()["auto_waiting"], 0)
+        for lease in held:
+            await lease.release()
+        self.assertEqual(router.scheduler.snapshot()["active"], {})
+
+    async def test_direct_source_releases_pending_acquire_when_client_closes(self) -> None:
+        storage = FakeStorage()
+        router = WebRouter(storage, SourceScheduler(), keepalive_seconds=0.005)
+        held = [await router.scheduler.acquire("web-deepseek", 3) for _ in range(3)]
+        deepseek = storage.sources[1]
+        request = CanonicalRequest(model="deepseek-web", upstream_model="default", messages=[])
+        events = router.stream(deepseek, request, RouteContext(deepseek))
+
+        self.assertEqual((await asyncio.wait_for(anext(events), timeout=1)).type, "keepalive")
+        await asyncio.wait_for(events.aclose(), timeout=1)
+
+        self.assertEqual(router.scheduler.snapshot()["waiting"], {})
+        for lease in held:
+            await lease.release()
+        self.assertEqual(router.scheduler.snapshot()["active"], {})
+
     async def test_direct_web_failure_updates_source_health_immediately(self) -> None:
         storage = FakeStorage()
 
